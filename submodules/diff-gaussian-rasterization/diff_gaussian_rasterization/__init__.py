@@ -481,7 +481,6 @@ class GaussianRasterizer(nn.Module):
             visible = _C.mark_visible(
                 positions, raster_settings.viewmatrix, raster_settings.projmatrix
             )
-
         return visible
 
     def forward(

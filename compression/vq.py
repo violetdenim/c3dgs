@@ -37,25 +37,12 @@ class VectorQuantize(nn.Module):
     def update(self, x: torch.Tensor, importance: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             min_dists, idx = weightedDistance(x.detach(), self.codebook.detach())
-            acc_importance = scatter(
-                importance, idx, 0, reduce="sum", dim_size=self.codebook.shape[0]
-            )
 
+            acc_importance = scatter(importance, idx, 0, reduce="sum", dim_size=self.codebook.shape[0])
             ema_inplace(self.entry_importance, acc_importance, self.decay)
 
-            codebook = scatter(
-                x * importance[:, None],
-                idx,
-                0,
-                reduce="sum",
-                dim_size=self.codebook.shape[0],
-            )
-
-            ema_inplace(
-                self.codebook,
-                codebook / (acc_importance[:, None] + self.eps),
-                self.decay,
-            )
+            codebook = scatter(x * importance[:, None], idx,0, reduce="sum", dim_size=self.codebook.shape[0])
+            ema_inplace(self.codebook, codebook / (acc_importance[:, None] + self.eps), self.decay)
 
             return min_dists
 
@@ -84,7 +71,7 @@ def vq_features(
     decay: float = 0.8,
     scale_normalize: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    importance_n = importance/importance.max()
+    importance_n = importance / importance.max()
     vq_model = VectorQuantize(
         channels=features.shape[-1],
         codebook_size=codebook_size,
@@ -94,14 +81,14 @@ def vq_features(
     vq_model.uniform_init(features)
 
     errors = []
-    for i in trange(steps):
+    for _ in trange(steps):
         batch = torch.randint(low=0, high=features.shape[0], size=[vq_chunk])
         vq_feature = features[batch]
         error = vq_model.update(vq_feature, importance=importance_n[batch]).mean().item()
         errors.append(error)
         if scale_normalize:
             # this computes the trace of the codebook covariance matrices
-            # we devide by the trace to ensure that matrices have normalized eigenvalues / scales
+            # we divide by the trace to ensure that matrices have normalized eigenvalues / scales
             tr = vq_model.codebook[:, [0, 3, 5]].sum(-1)
             vq_model.codebook /= tr[:, None]
 
@@ -116,22 +103,15 @@ def vq_features(
     return vq_model.codebook.data.detach(), vq_indices.detach()
 
 
-def join_features(
-    all_features: torch.Tensor,
-    keep_mask: torch.Tensor,
-    codebook: torch.Tensor,
-    codebook_indices: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def join_features(all_features: torch.Tensor, keep_mask: torch.Tensor,
+                  codebook: torch.Tensor, codebook_indices: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     keep_features = all_features[keep_mask]
     compressed_features = torch.cat([codebook, keep_features], 0)
 
-    indices = torch.zeros(
-        len(all_features), dtype=torch.long, device=all_features.device
-    )
+    indices = torch.zeros(len(all_features), dtype=torch.long, device=all_features.device)
     indices[~keep_mask] = codebook_indices
-    indices[keep_mask] = torch.arange(len(keep_features), device=indices.device) + len(
-        codebook
-    )
+    # enumerate rest (outliers) from len(codebook) to len(codebook) + len(keep_features)
+    indices[keep_mask] = torch.arange(len(keep_features), device=indices.device) + len(codebook)
 
     return compressed_features, indices
 

@@ -8,7 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import numpy as np
 import torch
 import math
 from diff_gaussian_rasterization import (
@@ -37,20 +37,15 @@ def render(
     """
 
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = (
-        torch.zeros_like(
-            pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda"
-        )
-        + 0
-    )
+    screenspace_points = (torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0)
     try:
         screenspace_points.retain_grad()
     except:
         pass
 
     # Set up rasterization configuration
-    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
-    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    tanfovx = math.tan(viewpoint_camera.intrinsic[0, 0] * 0.5)
+    tanfovy = math.tan(viewpoint_camera.intrinsic[1, 1] * 0.5)
 
     raster_settings = GaussianRasterizationSettings(
         image_height=int(viewpoint_camera.image_height),
@@ -68,46 +63,49 @@ def render(
         clamp_color=clamp_color,
     )
 
+    means3D = pc.get_xyz
+    means2D = screenspace_points
+    opacity = pc.get_opacity
+
     if pc.color_index_mode == ColorMode.ALL_INDEXED and pc.is_gaussian_indexed:
         rasterizer = GaussianRasterizerIndexed(raster_settings=raster_settings)
-
-        means3D = pc.get_xyz
-        means2D = screenspace_points
-        opacity = pc.get_opacity
         shs = pc._get_features_raw
         scales = pc.get_scaling_normalized
         scale_factors = pc.get_scaling_factor
         rotations = pc._rotation_post_activation
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
+        # rendered_image, radii = rasterizer(
+        #     means3D=means3D,
+        #     means2D=means2D,
+        #     shs=shs,
+        #     sh_indices=pc._feature_indices,
+        #     g_indices=pc._gaussian_indices,
+        #     colors_precomp=None,
+        #     opacities=opacity,
+        #     scales=scales,
+        #     scale_factors=scale_factors,
+        #     rotations=rotations,
+        #     cov3D_precomp=None,
+        # )
+
+        # precalculate visible points to speed up rasterization
+        visible = rasterizer.markVisible(pc.get_xyz)
         rendered_image, radii = rasterizer(
-            means3D=means3D,
-            means2D=means2D,
+            means3D=means3D[visible, :],
+            means2D=means2D[visible, :],
             shs=shs,
-            sh_indices=pc._feature_indices,
-            g_indices=pc._gaussian_indices,
+            sh_indices=pc._feature_indices[visible],
+            g_indices=pc._gaussian_indices[visible],
             colors_precomp=None,
-            opacities=opacity,
-            scales=scales,
-            scale_factors=scale_factors,
-            rotations=rotations,
+            opacities=opacity[visible],
+            scales=scales, #[visible, :] if scales is not None else None,
+            scale_factors=scale_factors[visible, :],
+            rotations=rotations, #[visible, :] if rotations is not None else None,
             cov3D_precomp=None,
         )
-
-        # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
-        # They will be excluded from value updates used in the splitting criteria.
-        return {
-            "render": rendered_image,
-            "viewspace_points": screenspace_points,
-            "visibility_filter": radii > 0,
-            "radii": radii,
-        }
     else:
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
-
-        means3D = pc.get_xyz
-        means2D = screenspace_points
-        opacity = pc.get_opacity
 
         # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
         # scaling / rotation by the rasterizer.
@@ -127,12 +125,8 @@ def render(
         colors_precomp = None
         if override_color is None:
             if pipe.convert_SHs_python:
-                shs_view = pc.get_features.transpose(1, 2).view(
-                    -1, 3, (pc.max_sh_degree + 1) ** 2
-                )
-                dir_pp = pc.get_xyz - viewpoint_camera.camera_center.repeat(
-                    pc.get_features.shape[0], 1
-                )
+                shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree + 1) ** 2)
+                dir_pp = pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)
                 dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
                 sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
                 colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
@@ -141,24 +135,37 @@ def render(
         else:
             colors_precomp = override_color
 
-        #
+        # # precalculate visible points to speed up rasterization
+        visible = rasterizer.markVisible(pc.get_xyz)
+        # visible = torch.ones(pc.get_xyz.shape[0], dtype=torch.bool, device=pc.get_xyz.device)
+        # np.save(f"dump_raster.npy", {"means3D": means3D.detach().cpu().numpy(), "means2D": means2D.detach().cpu().numpy(),
+        #                       "shs": shs.detach().cpu().numpy(), #"colors_precomp": colors_precomp.detach().cpu().numpy(),
+        #                       "opacities": opacity.detach().cpu().numpy(), "scales": scales.detach().cpu().numpy(),
+        #                       "rotations": rotations.detach().cpu().numpy(), #"cov3D_precomp": cov3D_precomp.detach().cpu().numpy()
+        #                       }
+        #         )
+
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii = rasterizer(
-            means3D=means3D,
-            means2D=means2D,
-            shs=shs,
-            colors_precomp=colors_precomp,
-            opacities=opacity,
-            scales=scales,
-            rotations=rotations,
-            cov3D_precomp=cov3D_precomp,
+            means3D=means3D[visible, :],
+            means2D=means2D[visible, :],
+            shs=shs[visible, :, :],
+            colors_precomp=colors_precomp[visible, :] if colors_precomp is not None else None,
+            opacities=opacity[visible, :],
+            scales=scales[visible, :] if scales is not None else None,
+            rotations=rotations[visible, :] if rotations is not None else None,
+            cov3D_precomp=cov3D_precomp[visible, :] if cov3D_precomp is not None else None,
         )
+        # visible = torch.ones(pc.get_xyz.shape[0], dtype=torch.bool, device=pc.get_xyz.device)
+        # rendered_image, radii = rasterizer(means3D=means3D, means2D=means2D, shs=shs, colors_precomp=colors_precomp,
+        #     opacities=opacity, scales=scales, rotations=rotations, cov3D_precomp=cov3D_precomp)
 
-        # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
-        # They will be excluded from value updates used in the splitting criteria.
-        return {
-            "render": rendered_image,
-            "viewspace_points": screenspace_points,
-            "visibility_filter": radii > 0,
-            "radii": radii,
-        }
+    # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+    # They will be excluded from value updates used in the splitting criteria.
+    return {
+        "render": rendered_image,
+        "viewspace_points": screenspace_points,
+        "visibility_filter": radii > 0,
+        "radii": radii,
+        "visible": visible
+    }

@@ -14,7 +14,6 @@ import torch
 from scene import Scene
 import os
 from tqdm import tqdm
-from os import makedirs
 from gaussian_renderer import render
 import torchvision
 from utils.general_utils import safe_state
@@ -24,21 +23,18 @@ from gaussian_renderer import GaussianModel
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
-    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+    render_path = os.path.join(model_path, name, f"ours_{iteration}", "renders")
+    gts_path = os.path.join(model_path, name, f"ours_{iteration}", "gt")
 
-    makedirs(render_path, exist_ok=True)
-    makedirs(gts_path, exist_ok=True)
+    os.makedirs(render_path, exist_ok=True)
+    os.makedirs(gts_path, exist_ok=True)
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         rendering = render(view, gaussians, pipeline, background)["render"]
-        gt = view.original_image[0:3, :, :]
-        torchvision.utils.save_image(
-            rendering, os.path.join(render_path, "{0:05d}".format(idx) + ".png")
-        )
-        torchvision.utils.save_image(
-            gt, os.path.join(gts_path, "{0:05d}".format(idx) + ".png")
-        )
+
+        torchvision.utils.save_image(rendering, os.path.join(render_path, f"{idx:05d}.png"))
+        torchvision.utils.save_image(view.original_image, os.path.join(gts_path, f"{idx:05d}.png"))
+
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -52,7 +48,8 @@ def render_sets(
 ):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False,override_quantization=True)
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, override_quantization=True,
+                      preload_image=False)
 
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")

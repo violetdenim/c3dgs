@@ -37,19 +37,11 @@ def unique_output_folder():
     return os.path.join("./output_vq/", unique_str[0:10])
 
 
-def calc_importance(
-    gaussians: GaussianModel, scene, pipeline_params
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    scaling = gaussians.scaling_qa(
-        gaussians.scaling_activation(gaussians._scaling.detach())
-    )
-    cov3d = gaussians.covariance_activation(
-        scaling, 1.0, gaussians.get_rotation.detach(), True
-    ).requires_grad_(True)
-    scaling_factor = gaussians.scaling_factor_activation(
-        gaussians.scaling_factor_qa(gaussians._scaling_factor.detach())
-    )
-
+def calc_importance(gaussians: GaussianModel, scene, pipeline_params) -> Tuple[torch.Tensor, torch.Tensor]:
+    scaling = gaussians.scaling_qa(gaussians.scaling_activation(gaussians._scaling.detach()))
+    cov3d = gaussians.covariance_activation(scaling, 1.0, gaussians.get_rotation.detach(), True).requires_grad_(True)
+    scaling_factor = gaussians.scaling_factor_activation(gaussians.scaling_factor_qa(gaussians._scaling_factor.detach()))
+    # hook is called on gradients each time gaussians are called
     h1 = gaussians._features_dc.register_hook(lambda grad: grad.abs())
     h2 = gaussians._features_rest.register_hook(lambda grad: grad.abs())
     h3 = cov3d.register_hook(lambda grad: grad.abs())
@@ -60,28 +52,20 @@ def calc_importance(
     num_pixels = 0
     for camera in tqdm(scene.getTrainCameras(), desc="Calculating sensitivity"):
         cov3d_scaled = cov3d * scaling_factor.square()
-        rendering = render(
-            camera,
-            gaussians,
-            pipeline_params,
-            background,
-            clamp_color=False,
-            cov3d=cov3d_scaled,
-        )["render"]
+        rendering = render(camera, gaussians, pipeline_params, background, clamp_color=False, cov3d=cov3d_scaled)["render"]
+
+        # gradients are accumulated during cycle each time backward is called
         loss = rendering.sum()
         loss.backward()
-        num_pixels += rendering.shape[1]*rendering.shape[2]
+        num_pixels += rendering.shape[1] * rendering.shape[2]
 
-    importance = torch.cat(
-        [gaussians._features_dc.grad, gaussians._features_rest.grad],
-        1,
-    ).flatten(-2)/num_pixels
-    cov_grad = cov3d.grad/num_pixels
+    importance = torch.cat([gaussians._features_dc.grad, gaussians._features_rest.grad], 1).flatten(-2)
+    cov_grad = cov3d.grad
     h1.remove()
     h2.remove()
     h3.remove()
     torch.cuda.empty_cache()
-    return importance.detach(), cov_grad.detach()
+    return importance.detach() / num_pixels, cov_grad.detach() / num_pixels
 
 
 def render_and_eval(
@@ -104,7 +88,7 @@ def render_and_eval(
             rendering = render(view, gaussians, pipeline_params, background)[
                 "render"
             ].unsqueeze(0)
-            gt = view.original_image[0:3, :, :].unsqueeze(0)
+            gt = view.get_image().unsqueeze(0)
 
             ssims.append(ssim(rendering, gt))
             psnrs.append(psnr(rendering, gt))
@@ -129,7 +113,8 @@ def run_vq(
         model_params.sh_degree, quantization=not optim_params.not_quantization_aware
     )
     scene = Scene(
-        model_params, gaussians, load_iteration=comp_params.load_iteration, shuffle=True
+        model_params, gaussians, load_iteration=comp_params.load_iteration, shuffle=True,
+        preload_image=True
     )
 
     if comp_params.start_checkpoint:
@@ -137,14 +122,10 @@ def run_vq(
         gaussians.restore(checkpoint_params, optim_params)
 
 
-    timings ={}
-
+    timings = {}
     # %%
-
     start_time = time.time()
-    color_importance, gaussian_sensitivity = calc_importance(
-        gaussians, scene, pipeline_params
-    )
+    color_importance, gaussian_sensitivity = calc_importance(gaussians, scene, pipeline_params)
     end_time = time.time()
     timings["sensitivity_calculation"] = end_time-start_time
     # %%
@@ -152,9 +133,7 @@ def run_vq(
     with torch.no_grad():
         start_time = time.time()
         color_importance_n = color_importance.amax(-1)
-
         gaussian_importance_n = gaussian_sensitivity.amax(-1)
-
         torch.cuda.empty_cache()
 
         color_compression_settings = CompressionSettings(
@@ -175,50 +154,30 @@ def run_vq(
             batch_size=comp_params.gaussian_batch_size,
         )
 
-        compress_gaussians(
-            gaussians,
-            color_importance_n,
-            gaussian_importance_n,
+        compress_gaussians(gaussians, color_importance_n, gaussian_importance_n,
             color_compression_settings if not comp_params.not_compress_color else None,
-            gaussian_compression_settings
-            if not comp_params.not_compress_gaussians
-            else None,
-            comp_params.color_compress_non_dir,
-            prune_threshold=comp_params.prune_threshold,
+            gaussian_compression_settings if not comp_params.not_compress_gaussians else None,
+            comp_params.color_compress_non_dir, prune_threshold=comp_params.prune_threshold,
         )
         end_time = time.time()
-        timings["clustering"]=end_time-start_time
+        timings["clustering"] = end_time-start_time
 
     gc.collect()
     torch.cuda.empty_cache()
     os.makedirs(comp_params.output_vq, exist_ok=True)
-
     copyfile(
         path.join(model_params.model_path, "cfg_args"),
         path.join(comp_params.output_vq, "cfg_args"),
     )
     model_params.model_path = comp_params.output_vq
 
-    with open(
-        os.path.join(comp_params.output_vq, "cfg_args_comp"), "w"
-    ) as cfg_log_f:
+    with open(os.path.join(comp_params.output_vq, "cfg_args_comp"), "w") as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(comp_params))))
 
     iteration = scene.loaded_iter + comp_params.finetune_iterations
     if comp_params.finetune_iterations > 0:
-
         start_time = time.time()
-        finetune(
-            scene,
-            model_params,
-            optim_params,
-            comp_params,
-            pipeline_params,
-            testing_iterations=[
-                -1
-            ],
-            debug_from=-1,
-        )
+        finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
         end_time = time.time()
         timings["finetune"]=end_time-start_time
 

@@ -41,10 +41,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
             pipe.debug = True
         render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = (
-            render_pkg["render"],
-            render_pkg["viewspace_points"],
-            render_pkg["visibility_filter"],
-            render_pkg["radii"],
+            render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"],
         )
 
         # Loss
@@ -82,7 +79,7 @@ def prepare_output_and_logger(output_folder, args):
         output_folder = os.path.join("./output/", unique_str[0:10])
 
     # Set up output folder
-    print("Output folder: {}".format(output_folder))
+    print(f"Output folder: {output_folder}")
     os.makedirs(output_folder, exist_ok=True)
     with open(os.path.join(output_folder, "cfg_args"), "w") as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))

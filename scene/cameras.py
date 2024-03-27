@@ -8,26 +8,26 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import cv2
 import torch
 from torch import nn
 import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
 class Camera(nn.Module):
-    def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
-                 image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda"
+    def __init__(self, colmap_id, extrinsic, intrinsic, h, w, #R, T, FoVx, FoVy
+                 image_name, image_path, uid,
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", preload_image=False
                  ):
         super(Camera, self).__init__()
 
         self.uid = uid
         self.colmap_id = colmap_id
-        self.R = R
-        self.T = T
-        self.FoVx = FoVx
-        self.FoVy = FoVy
+        self.extrinsic = extrinsic
+        self.intrinsic = intrinsic
         self.image_name = image_name
+        self.image_path = image_path
+        self.preload_image = preload_image
 
         try:
             self.data_device = torch.device(data_device)
@@ -35,15 +35,8 @@ class Camera(nn.Module):
             print(e)
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
-
-        self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
-        self.image_width = self.original_image.shape[2]
-        self.image_height = self.original_image.shape[1]
-
-        if gt_alpha_mask is not None:
-            self.original_image *= gt_alpha_mask.to(self.data_device)
-        else:
-            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+        self.image_width = w
+        self.image_height = h
 
         self.zfar = 100.0
         self.znear = 0.01
@@ -51,10 +44,34 @@ class Camera(nn.Module):
         self.trans = trans
         self.scale = scale
 
-        self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
-        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
+        self.world_view_transform = torch.tensor(getWorld2View2(None, None, self.extrinsic, trans, scale)).transpose(0, 1).cuda()
+        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.intrinsic[0, 0], fovY=self.intrinsic[1, 1]).transpose(0,1).cuda()
+
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
+
+        self.image = None
+        if preload_image:
+            self.original_image
+
+    @property
+    def original_image(self):
+        if self.image is None:
+            image = cv2.imread(self.image_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / 255.0
+            if image.shape[2] == 4:
+                alpha = image[:, :, 3]
+                for i in range(3):
+                    image[:, :, i] *= alpha
+            image = image[:, :, :3]
+            image = cv2.resize(image[:, :, ::-1], (self.image_width, self.image_height))
+            image = torch.from_numpy(image).to(self.data_device).permute(2, 0, 1)
+            self.image = image.clamp(0.0, 1.0)
+        if self.preload_image:
+            return self.image
+        else: # don't keep the image in memory
+            image = self.image
+            self.image = None
+            return image
 
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):

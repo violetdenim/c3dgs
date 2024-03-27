@@ -118,7 +118,6 @@ class OptimizationParams(ParamGroup):
         self.not_quantization_aware = False
         super().__init__(parser, "Optimization Parameters")
 
-
 def get_combined_args(parser: ArgumentParser,cmd=None):
     cmdlne_string = sys.argv[1:] if cmd is None else cmd
     cfgfile_string = "Namespace()"
