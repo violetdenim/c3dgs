@@ -28,9 +28,8 @@ class ColorMode(Enum):
     NOT_INDEXED = 0
     ALL_INDEXED = 1
 
-
 class GaussianModel:
-    def setup_functions(self):
+    def setup_functions(self, use_factor_scaling):
         def build_covariance_from_scaling_rotation(
             scaling, scaling_modifier, rotation, strip_sym=True
         ):
@@ -40,14 +39,14 @@ class GaussianModel:
                 return strip_symmetric(actual_covariance)
             else:
                 return actual_covariance
-
-        self.scaling_activation = lambda x: torch.nn.functional.normalize(torch.nn.functional.relu(x))
-        self.scaling_inverse_activation = lambda x: x
-        self.scaling_factor_activation = torch.exp
-        self.scaling_factor_inverse_activation = torch.log
-
-        # self.scaling_activation = torch.exp
-        # self.scaling_inverse_activation = torch.log
+        if use_factor_scaling:
+            self.scaling_activation = lambda x: torch.nn.functional.normalize(torch.nn.functional.relu(x))
+            self.scaling_inverse_activation = lambda x: x
+            self.scaling_factor_activation = torch.exp
+            self.scaling_factor_inverse_activation = torch.log
+        else:
+            self.scaling_activation = torch.exp
+            self.scaling_inverse_activation = torch.log
 
         self.covariance_activation = build_covariance_from_scaling_rotation
 
@@ -56,14 +55,17 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, sh_degree: int, quantization=True):
+    def __init__(self, sh_degree: int, quantization=True, use_factor_scaling=True):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0, device='cuda', requires_grad=True)
         self._scaling = torch.empty(0)
-        self._scaling_factor = torch.empty(0)
+        if use_factor_scaling:
+            self._scaling_factor = torch.empty(0)
+        else:
+            self._scaling_factor = None
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
         self.max_radii2D = torch.empty(0)
@@ -86,7 +88,8 @@ class GaussianModel:
         self.features_rest_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
         self.opacity_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
         self.scaling_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
-        self.scaling_factor_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
+        if use_factor_scaling:
+            self.scaling_factor_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
         self.rotation_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
         self.xyz_qa = FakeQuantizationHalf.apply
 
@@ -98,14 +101,15 @@ class GaussianModel:
             
             self.scaling_qa.disable_fake_quant()
             self.scaling_qa.disable_observer()
-            self.scaling_factor_qa.disable_fake_quant()
-            self.scaling_factor_qa.disable_observer()
+            if use_factor_scaling:
+                self.scaling_factor_qa.disable_fake_quant()
+                self.scaling_factor_qa.disable_observer()
 
             self.rotation_qa.disable_fake_quant()
             self.rotation_qa.disable_observer()
             self.xyz_qa = lambda x: x
 
-        self.setup_functions()
+        self.setup_functions(use_factor_scaling)
 
     def capture(self):
         return (
@@ -147,7 +151,9 @@ class GaussianModel:
     @property
     def get_scaling(self):
         scaling_n = self.scaling_qa(self.scaling_activation(self._scaling))
-        # return scaling_n
+        if self._scaling_factor is None:
+            return scaling_n
+
         scaling_factor = self.scaling_factor_activation(self.scaling_factor_qa(self._scaling_factor))
         if self.is_gaussian_indexed:
             return scaling_factor * scaling_n[self._gaussian_indices]
@@ -160,7 +166,11 @@ class GaussianModel:
 
     @property
     def get_scaling_factor(self):
-        return self.scaling_factor_activation(self.scaling_factor_qa(self._scaling_factor))
+        if self._scaling_factor is not None:
+            return self.scaling_factor_activation(self.scaling_factor_qa(self._scaling_factor))
+        else:
+            return 1.0
+
 
     @property
     def get_rotation(self):
@@ -232,9 +242,10 @@ class GaussianModel:
             {"params": [self._features_rest], "lr": training_args.feature_lr / 20.0, "name": "f_rest", },
             {"params": [self._opacity], "lr": training_args.opacity_lr, "name": "opacity", },
             {"params": [self._scaling], "lr": training_args.scaling_lr, "name": "scaling", },
-            {"params": [self._scaling_factor], "lr": training_args.scaling_lr, "name": "scaling_factor", },
             {"params": [self._rotation], "lr": training_args.rotation_lr, "name": "rotation", },
         ]
+        if self._scaling_factor is not None:
+            l.append(        {"params": [self._scaling_factor], "lr": training_args.scaling_lr, "name": "scaling_factor", })
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(
@@ -296,12 +307,12 @@ class GaussianModel:
             .numpy()
         )
         opacities = self._opacity.detach().cpu().numpy()
-        scale = (
-            self.scaling_factor_inverse_activation(self.get_scaling.detach())
-            # self.scaling_inverse_activation(self.get_scaling.detach())
-            .cpu()
-            .numpy()
-        )
+        scale = self.get_scaling.detach()
+        if self._scaling_factor is not None:
+            scale = self.scaling_factor_inverse_activation(scale)
+        else:
+            scale = self.scaling_inverse_activation(scale)
+        scale = scale.cpu().numpy()
 
         rotation = self.get_rotation.detach().cpu().numpy()
 
@@ -414,27 +425,17 @@ class GaussianModel:
             torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True)
         )
 
-        scaling = self.scaling_factor_activation(scaling)
-        scaling_norm = scaling.norm(2, -1, keepdim=True)
-        self._scaling = nn.Parameter(
-            self.scaling_inverse_activation(scaling / scaling.norm(2, -1, keepdim=True)).requires_grad_(True)
-        )
-
-        self._scaling_factor = nn.Parameter(
-            self.scaling_factor_inverse_activation(scaling_norm).detach().requires_grad_(True)
-        )
-        # !original
-        # self._scaling = nn.Parameter(scaling.requires_grad_(True))
-
-
-        # self._scaling_factor = nn.Parameter(
-        #     self.scaling_factor_inverse_activation(
-        #         self.scaling_factor_activation(scaling).norm(2, -1, keepdim=True)
-        #     ).detach().requires_grad_(True)
-        # )
-
-        # print(scaling)
-        self._scaling = nn.Parameter(scaling.requires_grad_(True))
+        if self._scaling_factor is not None:
+            scaling = self.scaling_factor_activation(scaling)
+            scaling_norm = scaling.norm(2, -1, keepdim=True)
+            self._scaling = nn.Parameter(
+                self.scaling_inverse_activation(scaling / scaling_norm).requires_grad_(True)
+            )
+            self._scaling_factor = nn.Parameter(
+                self.scaling_factor_inverse_activation(scaling_norm).detach().requires_grad_(True)
+            )
+        else:
+            self._scaling = nn.Parameter(scaling.requires_grad_(True))
 
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
         self.max_radii2D = torch.zeros((n_points), device="cuda")
@@ -531,26 +532,27 @@ class GaussianModel:
                 save_dict[
                     "scaling_zero_point"
                 ] = self.scaling_qa.zero_point.cpu().numpy()
-
-                scaling_factor = self._scaling_factor.detach()
-                scaling_factor_q = torch.quantize_per_tensor(
-                    scaling_factor,
-                    scale=self.scaling_factor_qa.scale,
-                    zero_point=self.scaling_factor_qa.zero_point,
-                    dtype=self.scaling_factor_qa.dtype,
-                ).int_repr()
-                save_dict["scaling_factor"] = scaling_factor_q.cpu().numpy()
-                save_dict[
-                    "scaling_factor_scale"
-                ] = self.scaling_factor_qa.scale.cpu().numpy()
-                save_dict[
-                    "scaling_factor_zero_point"
-                ] = self.scaling_factor_qa.zero_point.cpu().numpy()
+                if self._scaling_factor is not None:
+                    scaling_factor = self._scaling_factor.detach()
+                    scaling_factor_q = torch.quantize_per_tensor(
+                        scaling_factor,
+                        scale=self.scaling_factor_qa.scale,
+                        zero_point=self.scaling_factor_qa.zero_point,
+                        dtype=self.scaling_factor_qa.dtype,
+                    ).int_repr()
+                    save_dict["scaling_factor"] = scaling_factor_q.cpu().numpy()
+                    save_dict[
+                        "scaling_factor_scale"
+                    ] = self.scaling_factor_qa.scale.cpu().numpy()
+                    save_dict[
+                        "scaling_factor_zero_point"
+                    ] = self.scaling_factor_qa.zero_point.cpu().numpy()
             else:
                 save_dict["scaling"] = self._scaling.detach().to(dtype).cpu().numpy()
-                save_dict["scaling_factor"] = (
-                    self._scaling_factor.detach().to(dtype).cpu().numpy()
-                )
+                if self._scaling_factor is not None:
+                    save_dict["scaling_factor"] = (
+                        self._scaling_factor.detach().to(dtype).cpu().numpy()
+                    )
 
             # save rotation
             if self.quantization:
@@ -673,23 +675,25 @@ class GaussianModel:
             scaling_factor = (
                 scaling_factor_q - scaling_factor_zero_point
             ) * scaling_factor_scale
-            self._scaling_factor = nn.Parameter(
-                scaling_factor,
-                requires_grad=True,
-            )
-            self.scaling_factor_qa.scale = scaling_factor_scale
-            self.scaling_factor_qa.zero_point = scaling_factor_zero_point
-            self.scaling_factor_qa.activation_post_process.min_val = (
-                scaling_factor.min()
-            )
-            self.scaling_factor_qa.activation_post_process.max_val = (
-                scaling_factor.max()
-            )
+            if self._scaling_factor is not None:
+                self._scaling_factor = nn.Parameter(
+                    scaling_factor,
+                    requires_grad=True,
+                )
+                self.scaling_factor_qa.scale = scaling_factor_scale
+                self.scaling_factor_qa.zero_point = scaling_factor_zero_point
+                self.scaling_factor_qa.activation_post_process.min_val = (
+                    scaling_factor.min()
+                )
+                self.scaling_factor_qa.activation_post_process.max_val = (
+                    scaling_factor.max()
+                )
         else:
-            self._scaling_factor = nn.Parameter(
-                torch.from_numpy(state_dict["scaling_factor"]).float().cuda(),
-                requires_grad=True,
-            )
+            if self._scaling_factor is not None:
+                self._scaling_factor = nn.Parameter(
+                    torch.from_numpy(state_dict["scaling_factor"]).float().cuda(),
+                    requires_grad=True,
+                )
             self._scaling = nn.Parameter(
                 torch.from_numpy(state_dict["scaling"]).float().cuda(),
                 requires_grad=True,
@@ -739,9 +743,10 @@ class GaussianModel:
             order = mortonEncode(xyz_q).sort().indices
             self._xyz = nn.Parameter(self._xyz[order], requires_grad=True)
             self._opacity = nn.Parameter(self._opacity[order], requires_grad=True)
-            self._scaling_factor = nn.Parameter(
-                self._scaling_factor[order], requires_grad=True
-            )
+            if self._scaling_factor is not None:
+                self._scaling_factor = nn.Parameter(
+                    self._scaling_factor[order], requires_grad=True
+                )
 
             if self.is_color_indexed:
                 self._feature_indices = nn.Parameter(
@@ -767,9 +772,10 @@ class GaussianModel:
         with torch.no_grad():
             self._xyz = nn.Parameter(self._xyz[mask], requires_grad=True)
             self._opacity = nn.Parameter(self._opacity[mask], requires_grad=True)
-            self._scaling_factor = nn.Parameter(
-                self._scaling_factor[mask], requires_grad=True
-            )
+            if self._scaling_factor is not None:
+                self._scaling_factor = nn.Parameter(
+                    self._scaling_factor[mask], requires_grad=True
+                )
 
             if self.is_color_indexed:
                 self._feature_indices = nn.Parameter(
@@ -851,7 +857,8 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
-        self._scaling_factor = optimizable_tensors["scaling_factor"]
+        if self._scaling_factor is not None:
+            self._scaling_factor = optimizable_tensors["scaling_factor"]
         self._rotation = optimizable_tensors["rotation"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
@@ -902,8 +909,8 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
-
-        self._scaling_factor = optimizable_tensors["scaling_factor"]
+        if self._scaling_factor is not None:
+            self._scaling_factor = optimizable_tensors["scaling_factor"]
 
         self._rotation = optimizable_tensors["rotation"]
 
@@ -930,8 +937,10 @@ class GaussianModel:
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
 
         new_scaling = self.scaling_inverse_activation(stds / (0.8 * N))
-        ### NEW CODE!
-        new_scaling_factor = self._scaling_factor[selected_pts_mask].repeat(N, 1)
+        if self._scaling_factor is not None:
+            new_scaling_factor = self._scaling_factor[selected_pts_mask].repeat(N, 1)
+        else:
+            new_scaling_factor = None
 
         new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
@@ -960,7 +969,10 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask] if len(self._features_rest) > 0 else self._features_rest
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
-        new_scaling_factor = self._scaling_factor[selected_pts_mask]
+        if self._scaling_factor is not None:
+            new_scaling_factor = self._scaling_factor[selected_pts_mask]
+        else:
+            new_scaling_factor = None
         new_rotation = self._rotation[selected_pts_mask]
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, \
                                    new_scaling,

@@ -105,3 +105,6 @@ class Scene:
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+
+    def __len__(self, scale=1.0):
+        return len(self.train_cameras[scale]) + len(self.test_cameras[scale])
