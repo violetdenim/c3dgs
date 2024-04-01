@@ -136,29 +136,23 @@ def render(
             colors_precomp = override_color
 
         # # precalculate visible points to speed up rasterization
-        visible = rasterizer.markVisible(pc.get_xyz)
-        # visible = torch.ones(pc.get_xyz.shape[0], dtype=torch.bool, device=pc.get_xyz.device)
-        # np.save(f"dump_raster.npy", {"means3D": means3D.detach().cpu().numpy(), "means2D": means2D.detach().cpu().numpy(),
-        #                       "shs": shs.detach().cpu().numpy(), #"colors_precomp": colors_precomp.detach().cpu().numpy(),
-        #                       "opacities": opacity.detach().cpu().numpy(), "scales": scales.detach().cpu().numpy(),
-        #                       "rotations": rotations.detach().cpu().numpy(), #"cov3D_precomp": cov3D_precomp.detach().cpu().numpy()
-        #                       }
-        #         )
-
-        # Rasterize visible Gaussians to image, obtain their radii (on screen).
+        # visible = rasterizer.markVisible(pc.get_xyz)
+        # # Rasterize visible Gaussians to image, obtain their radii (on screen).
+        # rendered_image, radii = rasterizer(
+        #     means3D=means3D[visible, :],
+        #     means2D=means2D[visible, :],
+        #     shs=shs[visible, :, :],
+        #     colors_precomp=colors_precomp[visible, :] if colors_precomp is not None else None,
+        #     opacities=opacity[visible, :],
+        #     scales=scales[visible, :] if scales is not None else None,
+        #     rotations=rotations[visible, :] if rotations is not None else None,
+        #     cov3D_precomp=cov3D_precomp[visible, :] if cov3D_precomp is not None else None,
+        # )
+        visible = torch.ones(pc.get_xyz.shape[0], dtype=torch.bool, device=pc.get_xyz.device)
         rendered_image, radii = rasterizer(
-            means3D=means3D[visible, :],
-            means2D=means2D[visible, :],
-            shs=shs[visible, :, :],
-            colors_precomp=colors_precomp[visible, :] if colors_precomp is not None else None,
-            opacities=opacity[visible, :],
-            scales=scales[visible, :] if scales is not None else None,
-            rotations=rotations[visible, :] if rotations is not None else None,
-            cov3D_precomp=cov3D_precomp[visible, :] if cov3D_precomp is not None else None,
+            means3D=means3D, means2D=means2D, shs=shs, colors_precomp=colors_precomp,
+            opacities=opacity, scales=scales, rotations=rotations, cov3D_precomp=cov3D_precomp
         )
-        # visible = torch.ones(pc.get_xyz.shape[0], dtype=torch.bool, device=pc.get_xyz.device)
-        # rendered_image, radii = rasterizer(means3D=means3D, means2D=means2D, shs=shs, colors_precomp=colors_precomp,
-        #     opacities=opacity, scales=scales, rotations=rotations, cov3D_precomp=cov3D_precomp)
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.

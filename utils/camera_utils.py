@@ -14,7 +14,7 @@ import numpy as np
 
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale, preload_image=False):
+def loadCam(args, id, cam_info, resolution_scale, save_memory=False):
     orig_w, orig_h = cam_info.width, cam_info.height#cam_info.image.size
 
     if args.resolution in [1, 2, 4, 8]:
@@ -39,10 +39,10 @@ def loadCam(args, id, cam_info, resolution_scale, preload_image=False):
     return Camera(colmap_id=cam_info.uid, extrinsic=cam_info.extrinsic, intrinsic=cam_info.intrinsic,
                   h=resolution[1], w=resolution[0],
                   image_name=cam_info.image_name, image_path=cam_info.image_path, uid=id, data_device=args.data_device,
-                  preload_image=preload_image)
+                  save_memory=save_memory)
 
-def cameraList_from_camInfos(cam_infos, resolution_scale, preload_image, args):
-    return [loadCam(args, id, c, resolution_scale, preload_image=preload_image) for id, c in enumerate(cam_infos)]
+def cameraList_from_camInfos(cam_infos, resolution_scale, save_memory, args):
+    return [loadCam(args, id, c, resolution_scale, save_memory=save_memory) for id, c in enumerate(cam_infos)]
 
 def camera_to_JSON(id, camera : Camera):
     Rt = camera.extrinsic #np.eye(4)

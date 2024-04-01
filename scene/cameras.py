@@ -17,7 +17,7 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 class Camera(nn.Module):
     def __init__(self, colmap_id, extrinsic, intrinsic, h, w, #R, T, FoVx, FoVy
                  image_name, image_path, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", preload_image=False
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", save_memory=False
                  ):
         super(Camera, self).__init__()
 
@@ -27,7 +27,6 @@ class Camera(nn.Module):
         self.intrinsic = intrinsic
         self.image_name = image_name
         self.image_path = image_path
-        self.preload_image = preload_image
 
         try:
             self.data_device = torch.device(data_device)
@@ -50,13 +49,12 @@ class Camera(nn.Module):
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
 
-        self.image = None
-        if preload_image:
-            self.original_image
+        self.save_memory = save_memory
+        self._image = None
 
     @property
     def original_image(self):
-        if self.image is None:
+        if self._image is None:
             image = cv2.imread(self.image_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / 255.0
             if image.shape[2] == 4:
                 alpha = image[:, :, 3]
@@ -65,12 +63,15 @@ class Camera(nn.Module):
             image = image[:, :, :3]
             image = cv2.resize(image[:, :, ::-1], (self.image_width, self.image_height))
             image = torch.from_numpy(image).to(self.data_device).permute(2, 0, 1)
-            self.image = image.clamp(0.0, 1.0)
-        if self.preload_image:
-            return self.image
-        else: # don't keep the image in memory
-            image = self.image
-            self.image = None
+            image = image.clamp(0.0, 1.0)
+            if self.save_memory:
+                return image
+            self._image = image
+            return self._image
+        if not self.save_memory:
+            return self._image
+        else:
+            image, self._image = self._image, None
             return image
 
 class MiniCam:

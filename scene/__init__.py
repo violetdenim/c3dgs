@@ -26,7 +26,7 @@ class Scene:
     gaussians : GaussianModel | GaussianModelSrc
 
     def __init__(self, args : ModelParams, gaussians : GaussianModel | GaussianModelSrc, load_iteration=None, shuffle=True, \
-                 resolution_scales=[1.0], override_quantization=False, preload_image=False):
+                 resolution_scales=[1.0], override_quantization=False, save_memory=False):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -76,9 +76,9 @@ class Scene:
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, preload_image=preload_image, args=args)
+            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, save_memory=save_memory,args=args)
             print("Loading Test Cameras")
-            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, preload_image=preload_image, args=args)
+            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, save_memory=save_memory, args=args)
 
         if self.loaded_iter and os.path.exists(sub_path):
             self.gaussians.load(
@@ -97,7 +97,7 @@ class Scene:
             self.gaussians.spatial_lr_scale = scene_info.nerf_normalization["radius"]
 
     def save(self, iteration):
-        point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+        point_cloud_path = os.path.join(self.model_path, f"point_cloud/iteration_{iteration}")
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
     def getTrainCameras(self, scale=1.0):

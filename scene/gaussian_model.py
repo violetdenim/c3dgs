@@ -39,6 +39,7 @@ class GaussianModel:
                 return strip_symmetric(actual_covariance)
             else:
                 return actual_covariance
+
         if use_factor_scaling:
             self.scaling_activation = lambda x: torch.nn.functional.normalize(torch.nn.functional.relu(x))
             self.scaling_inverse_activation = lambda x: x
@@ -111,6 +112,27 @@ class GaussianModel:
 
         self.setup_functions(use_factor_scaling)
 
+
+    def zero_grad(self):
+        if self._xyz.grad is not None:
+            self._xyz.grad.zero_()
+        if self._features_dc.grad is not None:
+            self._features_dc.grad.zero_()
+        if self._features_rest.grad is not None:
+            self._features_rest.grad.zero_()
+        if self._scaling.grad is not None:
+            self._scaling.grad.zero_()
+        if self._rotation.grad is not None:
+            self._rotation.grad.zero_()
+        if self._opacity.grad is not None:
+            self._opacity.grad.zero_()
+        if self.max_radii2D.grad is not None:
+            self.max_radii2D.grad.zero_()
+        if self.xyz_gradient_accum is not None:
+            self.xyz_gradient_accum.zero_()
+        if self.denom is not None:
+            self.denom.zero_()
+
     def capture(self):
         return (
             self.active_sh_degree,
@@ -150,11 +172,10 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        scaling_n = self.scaling_qa(self.scaling_activation(self._scaling))
-        if self._scaling_factor is None:
-            return scaling_n
-
-        scaling_factor = self.scaling_factor_activation(self.scaling_factor_qa(self._scaling_factor))
+        scaling_n = self.get_scaling_normalized # self.scaling_qa(self.scaling_activation(self._scaling))
+        # if self._scaling_factor is None:
+        #     return scaling_n
+        scaling_factor = self.get_scaling_factor
         if self.is_gaussian_indexed:
             return scaling_factor * scaling_n[self._gaussian_indices]
         else:
@@ -245,7 +266,7 @@ class GaussianModel:
             {"params": [self._rotation], "lr": training_args.rotation_lr, "name": "rotation", },
         ]
         if self._scaling_factor is not None:
-            l.append(        {"params": [self._scaling_factor], "lr": training_args.scaling_lr, "name": "scaling_factor", })
+            l.append({"params": [self._scaling_factor], "lr": training_args.scaling_lr, "name": "scaling_factor", })
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(
@@ -372,7 +393,7 @@ class GaussianModel:
             extra_f_names = sorted(extra_f_names, key=lambda x: int(x.split("_")[-1]))
 
             # determine active_degree
-            degree = {3 * ((active + 1) ** 2 - 1) : active for active in range(self.max_sh_degree)}
+            degree = {3 * ((active + 1) ** 2 - 1) : active for active in range(self.max_sh_degree+1)}
 
             self.active_sh_degree = degree.get(len(extra_f_names), None)
             assert self.active_sh_degree # not None

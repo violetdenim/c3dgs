@@ -8,9 +8,13 @@ from argparse import ArgumentParser, Namespace
 from os import path
 from shutil import copyfile
 from typing import Dict, Tuple
+from scene.cameras import Camera
 
+import numpy as np
 import torch
+from time import sleep
 from tqdm import tqdm
+from utils.loss_utils import l1_loss, ssim
 
 # %%
 from arguments import (
@@ -28,6 +32,7 @@ from finetune import finetune
 from utils.image_utils import psnr
 from utils.loss_utils import ssim
 
+from copy import deepcopy
 
 def unique_output_folder():
     if os.getenv("OAR_JOB_ID"):
@@ -37,7 +42,8 @@ def unique_output_folder():
     return os.path.join("./output_vq/", unique_str[0:10])
 
 
-def calc_importance(gaussians: GaussianModel, scene, pipeline_params) -> Tuple[torch.Tensor, torch.Tensor]:
+def calc_importance(gaussians: GaussianModel, scene: Scene, pipeline_params, silent=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    gaussians.zero_grad()
     scaling = gaussians.scaling_qa(gaussians.scaling_activation(gaussians._scaling.detach()))
     cov3d = gaussians.covariance_activation(scaling, 1.0, gaussians.get_rotation.detach(), True).requires_grad_(True)
     scaling_factor = gaussians.scaling_factor_activation(gaussians.scaling_factor_qa(gaussians._scaling_factor.detach()))
@@ -47,10 +53,18 @@ def calc_importance(gaussians: GaussianModel, scene, pipeline_params) -> Tuple[t
     h3 = cov3d.register_hook(lambda grad: grad.abs())
     background = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
 
-    gaussians._features_dc.grad = None
-    gaussians._features_rest.grad = None
+    # gaussians._features_dc.retain_grad()
+    # gaussians._features_rest.retain_grad()
+    # cov3d.retain_grad()
+
     num_pixels = 0
-    for camera in tqdm(scene.getTrainCameras(), desc="Calculating sensitivity"):
+
+    iterator = scene.getTestCameras()
+    if len(iterator) == 0:
+        iterator = scene.getTrainCameras()
+    if not silent:
+        iterator = tqdm(iterator, desc="Calculating importance")
+    for camera in iterator:
         cov3d_scaled = cov3d * scaling_factor.square()
         rendering = render(camera, gaussians, pipeline_params, background, clamp_color=False, cov3d=cov3d_scaled)["render"]
 
@@ -67,6 +81,48 @@ def calc_importance(gaussians: GaussianModel, scene, pipeline_params) -> Tuple[t
     torch.cuda.empty_cache()
     return importance.detach() / num_pixels, cov_grad.detach() / num_pixels
 
+def calc_importance_experimental(gaussians: GaussianModel, scene: Scene, pipeline_params: PipelineParams, silent=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    cov3d_scaled = gaussians.get_covariance().detach()
+    scaling_factor = gaussians.get_scaling_factor.detach()
+    coeff = scaling_factor.square()
+    cov3d = (cov3d_scaled / coeff).requires_grad_(True)
+
+    accum1 = torch.zeros_like(gaussians._features_dc).requires_grad_(False)
+    accum2 = torch.zeros_like(gaussians._features_rest).requires_grad_(False)
+    accum3 = torch.zeros_like(cov3d).requires_grad_(False)
+    background = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
+
+    num_pixels = 0
+    iterator = scene.getTestCameras()
+    if len(iterator) == 0:
+        iterator = scene.getTrainCameras()
+    if not silent:
+        iterator = tqdm(iterator, desc="Calculating importance")
+
+    for camera in iterator:
+        gaussians.zero_grad()  # all grads to zero
+        if cov3d.grad is not None:
+            cov3d.grad.zero_()
+        image = render(camera, gaussians, pipeline_params, background, clamp_color=True, cov3d=cov3d * coeff)["render"]
+        # gradients are accumulated during cycle each time backward is called
+        image.sum().backward()
+
+        # lambda_dssim = 0.2
+        # gt_image = camera.original_image.cuda()
+        # l1_diff = l1_loss(image, gt_image)
+        # _ssim = ssim(image, gt_image)
+        # loss = (1.0 - lambda_dssim) * l1_diff + lambda_dssim * (1.0 - _ssim)
+        # loss.backward()
+
+        accum1 += torch.abs(gaussians._features_dc.grad)
+        accum2 += torch.abs(gaussians._features_rest.grad)
+        accum3 += torch.abs(cov3d.grad)
+        num_pixels += image.shape[1] * image.shape[2]
+
+    importance = torch.cat([accum1, accum2], 1).flatten(-2)
+    cov_grad = accum3
+    torch.cuda.empty_cache()
+    return importance / num_pixels, cov_grad / num_pixels
 
 def render_and_eval(
     gaussians: GaussianModel,
@@ -103,29 +159,71 @@ def render_and_eval(
         }
 
 
+
+def check_equal_fields(gaussians1: GaussianModel, gaussians2: GaussianModel, do_print=False, skip=[]):
+    def list_vars(object, skip=[]):
+        return [var for var in vars(object) if (var not in skip) and (not callable(getattr(object, var)))]
+    def process(var, a, b, do_print):
+        if do_print:
+            print(var, a, b)
+        if a is None:
+            assert (b is None)
+            return
+        if isinstance(a, list):
+            assert(len(a) == len(b))
+            for idx, (_a, _b) in enumerate(zip(a, b)):
+                process(f"{var}_{idx}", _a, _b, do_print=do_print)
+            return
+        if isinstance(a, dict):
+            for k in a.keys():
+                process(f"{var}_{k}", a[k], b[k], do_print=do_print)
+            return
+        if isinstance(a, torch.Tensor):
+            assert (a.numel() == b.numel())
+            if a.numel() > 0:
+                assert (torch.abs(a - b).sum() < 1e-5)
+            return
+        if isinstance(a, np.ndarray):
+            assert (np.abs(a - b).sum() < 1e-5)
+            return
+        if isinstance(a, Camera):
+            for _var in list_vars(a, skip=skip):
+                process(f"{var}_{_var}", a.__dict__[_var], b.__dict__[_var], do_print=do_print)
+            return
+        assert (a == b)
+
+    for var in list_vars(gaussians1, skip=skip):
+        a, b = gaussians1.__dict__[var], gaussians2.__dict__[var]
+        process(var, a, b, do_print=do_print)
+
 def run_vq(
     model_params: ModelParams,
     optim_params: OptimizationParams,
     pipeline_params: PipelineParams,
     comp_params: CompressionParams,
 ):
-    gaussians = GaussianModel(
-        model_params.sh_degree, quantization=not optim_params.not_quantization_aware
-    )
-    scene = Scene(
-        model_params, gaussians, load_iteration=comp_params.load_iteration, shuffle=True,
-        preload_image=True
-    )
+    gaussians = GaussianModel(model_params.sh_degree, \
+                              quantization=not optim_params.not_quantization_aware, \
+                              use_factor_scaling=True)
+
+    scene = Scene(model_params, gaussians, load_iteration=comp_params.load_iteration, shuffle=False, save_memory=True)
 
     if comp_params.start_checkpoint:
         (checkpoint_params, first_iter) = torch.load(comp_params.start_checkpoint)
         gaussians.restore(checkpoint_params, optim_params)
 
-
     timings = {}
     # %%
     start_time = time.time()
-    color_importance, gaussian_sensitivity = calc_importance(gaussians, scene, pipeline_params)
+    color_importance, gaussian_sensitivity = calc_importance_experimental(gaussians, scene, pipeline_params)
+    # color_importance_, gaussian_sensitivity_ = calc_importance(gaussians, scene, pipeline_params)
+    # print(color_importance_.max(), color_importance.max(), torch.abs(color_importance_ - color_importance).sum())
+    # print(gaussian_sensitivity_.max(), gaussian_sensitivity.max(), torch.abs(gaussian_sensitivity_ - gaussian_sensitivity).sum())
+    # idx = torch.where(torch.abs(gaussian_sensitivity_ - gaussian_sensitivity).sum(axis=1) > 1e-05)
+    # print(idx)
+    # print(gaussian_sensitivity_[idx])
+    # print(gaussian_sensitivity[idx])
+    # exit(0)
     end_time = time.time()
     timings["sensitivity_calculation"] = end_time-start_time
     # %%
