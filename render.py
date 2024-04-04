@@ -1,25 +1,12 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 import gc
 import torch
-from scene import Scene
+from scene import Scene, GaussianModel
 import os
 from tqdm import tqdm
-from gaussian_renderer import render
 import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
@@ -30,7 +17,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     os.makedirs(gts_path, exist_ok=True)
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        rendering = render(view, gaussians, pipeline, background)["render"]
+        rendering = gaussians.render(view, pipeline, background)["render"]
 
         torchvision.utils.save_image(rendering, os.path.join(render_path, f"{idx:05d}.png"))
         torchvision.utils.save_image(view.original_image, os.path.join(gts_path, f"{idx:05d}.png"))
@@ -92,10 +79,4 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(
-        model.extract(args),
-        args.iteration,
-        pipeline.extract(args),
-        args.skip_train,
-        args.skip_test,
-    )
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)

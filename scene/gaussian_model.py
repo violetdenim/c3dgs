@@ -11,16 +11,33 @@
 
 import torch
 import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func
 from torch import nn
 import os
-from utils.system_utils import mkdir_p
+
 from plyfile import PlyData, PlyElement
 from utils.general_utils import strip_symmetric, build_scaling_rotation, build_rotation
 from enum import Enum
 
 from utils.sh_utils import RGB2SH
+from utils.loss_utils import l1_loss, ssim
+from utils.image_utils import psnr
+from utils.system_utils import mkdir_p
+from utils.general_utils import inverse_sigmoid, get_expon_lr_func
+
+from arguments import (
+    CompressionParams,
+    ModelParams,
+    OptimizationParams,
+    PipelineParams,
+    get_combined_args,
+)
+from compression.vq import CompressionSettings, compress_gaussians
 from simple_knn._C import distCUDA2
+from utils.splats import to_full_cov, extract_rot_scale
+import math
+from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer, GaussianRasterizerIndexed
+from utils.sh_utils import eval_sh
+
 # from utils.graphics_utils import BasicPointCloud
 
 
@@ -172,10 +189,10 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        scaling_n = self.get_scaling_normalized # self.scaling_qa(self.scaling_activation(self._scaling))
-        # if self._scaling_factor is None:
-        #     return scaling_n
-        scaling_factor = self.get_scaling_factor
+        scaling_n = self.scaling_qa(self.scaling_activation(self._scaling)) # self.get_scaling_normalized #
+        if self._scaling_factor is None:
+            return scaling_n
+        scaling_factor = self.scaling_factor_activation(self.scaling_factor_qa(self._scaling_factor)) # self.get_scaling_factor
         if self.is_gaussian_indexed:
             return scaling_factor * scaling_n[self._gaussian_indices]
         else:
@@ -213,11 +230,8 @@ class GaussianModel:
     def get_features(self):
         features_dc = self.features_dc_qa(self._features_dc)
         features_rest = self.features_rest_qa(self._features_rest)
-
-        if self.color_index_mode == ColorMode.ALL_INDEXED:
-            return torch.cat((features_dc, features_rest), dim=1)[self._feature_indices]
-        else:
-            return torch.cat((features_dc, features_rest), dim=1)
+        _ret = torch.cat((features_dc, features_rest), dim=1)
+        return _ret[self._feature_indices] if self.color_index_mode == ColorMode.ALL_INDEXED else _ret
         
     @property
     def _get_features_raw(self):
@@ -497,9 +511,7 @@ class GaussianModel:
                 ).int_repr()
                 save_dict["features_dc"] = features_dc_q.cpu().numpy()
                 save_dict["features_dc_scale"] = self.features_dc_qa.scale.cpu().numpy()
-                save_dict[
-                    "features_dc_zero_point"
-                ] = self.features_dc_qa.zero_point.cpu().numpy()
+                save_dict["features_dc_zero_point"] = self.features_dc_qa.zero_point.cpu().numpy()
 
                 features_rest_q = torch.quantize_per_tensor(
                     self._features_rest.detach(),
@@ -571,9 +583,7 @@ class GaussianModel:
             else:
                 save_dict["scaling"] = self._scaling.detach().to(dtype).cpu().numpy()
                 if self._scaling_factor is not None:
-                    save_dict["scaling_factor"] = (
-                        self._scaling_factor.detach().to(dtype).cpu().numpy()
-                    )
+                    save_dict["scaling_factor"] = self._scaling_factor.detach().to(dtype).cpu().numpy()
 
             # save rotation
             if self.quantization:
@@ -586,9 +596,7 @@ class GaussianModel:
                 ).int_repr()
                 save_dict["rotation"] = rotation_q.cpu().numpy()
                 save_dict["rotation_scale"] = self.rotation_qa.scale.cpu().numpy()
-                save_dict[
-                    "rotation_zero_point"
-                ] = self.rotation_qa.zero_point.cpu().numpy()
+                save_dict["rotation_zero_point"] = self.rotation_qa.zero_point.cpu().numpy()
             else:
                 save_dict["rotation"] = self._rotation.detach().to(dtype).cpu().numpy()
 
@@ -639,7 +647,6 @@ class GaussianModel:
             self.features_dc_qa.zero_point = features_dc_zero_point
             self.features_dc_qa.activation_post_process.min_val = features_dc.min()
             self.features_dc_qa.activation_post_process.max_val = features_dc.max()
-
         else:
             features_dc = torch.from_numpy(state_dict["features_dc"]).float().cuda()
             features_rest = torch.from_numpy(state_dict["features_rest"]).float().cuda()
@@ -696,25 +703,23 @@ class GaussianModel:
             scaling_factor = (
                 scaling_factor_q - scaling_factor_zero_point
             ) * scaling_factor_scale
-            if self._scaling_factor is not None:
-                self._scaling_factor = nn.Parameter(
-                    scaling_factor,
-                    requires_grad=True,
-                )
-                self.scaling_factor_qa.scale = scaling_factor_scale
-                self.scaling_factor_qa.zero_point = scaling_factor_zero_point
-                self.scaling_factor_qa.activation_post_process.min_val = (
-                    scaling_factor.min()
-                )
-                self.scaling_factor_qa.activation_post_process.max_val = (
-                    scaling_factor.max()
-                )
+            self._scaling_factor = nn.Parameter(
+                scaling_factor,
+                requires_grad=True,
+            )
+            self.scaling_factor_qa.scale = scaling_factor_scale
+            self.scaling_factor_qa.zero_point = scaling_factor_zero_point
+            self.scaling_factor_qa.activation_post_process.min_val = (
+                scaling_factor.min()
+            )
+            self.scaling_factor_qa.activation_post_process.max_val = (
+                scaling_factor.max()
+            )
         else:
-            if self._scaling_factor is not None:
-                self._scaling_factor = nn.Parameter(
-                    torch.from_numpy(state_dict["scaling_factor"]).float().cuda(),
-                    requires_grad=True,
-                )
+            self._scaling_factor = nn.Parameter(
+                torch.from_numpy(state_dict["scaling_factor"]).float().cuda(),
+                requires_grad=True,
+            )
             self._scaling = nn.Parameter(
                 torch.from_numpy(state_dict["scaling"]).float().cuda(),
                 requires_grad=True,
@@ -753,6 +758,234 @@ class GaussianModel:
             self.color_index_mode = ColorMode.ALL_INDEXED
 
         self.active_sh_degree = self.max_sh_degree
+
+
+    def render(self,
+            viewpoint_camera,
+            pipe: PipelineParams,
+            bg_color: torch.Tensor,
+            scaling_modifier=1.0,
+            override_color=None,
+            clamp_color: bool = True,
+            cov3d: torch.Tensor = None,
+    ):
+        """
+        Render the scene.
+
+        Background tensor (bg_color) must be on GPU!
+        """
+
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        screenspace_points = (
+                    torch.zeros_like(self.get_xyz, dtype=self.get_xyz.dtype, requires_grad=True, device="cuda") + 0)
+        try:
+            screenspace_points.retain_grad()
+        except:
+            pass
+
+        # Set up rasterization configuration
+        tanfovx = math.tan(viewpoint_camera.intrinsic[0, 0] * 0.5)
+        tanfovy = math.tan(viewpoint_camera.intrinsic[1, 1] * 0.5)
+
+        raster_settings = GaussianRasterizationSettings(
+            image_height=int(viewpoint_camera.image_height),
+            image_width=int(viewpoint_camera.image_width),
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            bg=bg_color,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewpoint_camera.world_view_transform,
+            projmatrix=viewpoint_camera.full_proj_transform,
+            sh_degree=self.active_sh_degree,
+            campos=viewpoint_camera.camera_center,
+            prefiltered=False,
+            debug=pipe.debug,
+            clamp_color=clamp_color,
+        )
+
+        render_indexed = (self.color_index_mode == ColorMode.ALL_INDEXED) and self.is_gaussian_indexed
+
+        means3D = self.get_xyz
+        means2D = screenspace_points
+        opacity = self.get_opacity
+
+        rasterizer = GaussianRasterizerIndexed(raster_settings=raster_settings) if render_indexed \
+            else GaussianRasterizer(raster_settings=raster_settings)
+
+        # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
+        # scaling / rotation by the rasterizer.
+        scales = None
+        rotations = None
+        cov3D_precomp = cov3d
+        if cov3D_precomp is None:
+            if pipe.compute_cov3D_python:
+                cov3D_precomp = self.get_covariance(scaling_modifier)
+            else:
+                scales = self.get_scaling_normalized if render_indexed else self.get_scaling
+                rotations = self._rotation_post_activation if render_indexed else self.get_rotation
+
+        scale_factors = self.get_scaling_factor if render_indexed else None
+
+        shs = None
+        colors_precomp = None
+        if override_color is None:
+            if pipe.convert_SHs_python:
+                shs_view = self.get_features.transpose(1, 2).view(-1, 3, (self.max_sh_degree + 1) ** 2)
+                dir_pp = self.get_xyz - viewpoint_camera.camera_center.repeat(self.get_features.shape[0], 1)
+                dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+                sh2rgb = eval_sh(self.active_sh_degree, shs_view, dir_pp_normalized)
+                colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+            else:
+                shs = self._get_features_raw if render_indexed else self.get_features
+        else:
+            colors_precomp = override_color
+
+        # precalculate visible points
+        visible = rasterizer.markVisible(self.get_xyz)
+        # visible = torch.ones(pc.get_xyz.shape[0], dtype=torch.bool, device=pc.get_xyz.device)
+
+        if render_indexed:
+            rendered_image, radii = rasterizer(
+                means3D=means3D[visible, :],
+                means2D=means2D[visible, :],
+                shs=shs,
+                sh_indices=self._feature_indices[visible],
+                g_indices=self._gaussian_indices[visible],
+                colors_precomp=None,
+                opacities=opacity[visible],
+                scales=scales,
+                scale_factors=scale_factors[visible, :],
+                rotations=rotations,
+                cov3D_precomp=cov3D_precomp[visible, :] if cov3D_precomp is not None else None,
+            )
+        else:
+            rendered_image, radii = rasterizer(
+                means3D=means3D[visible, :],
+                means2D=means2D[visible, :],
+                shs=shs[visible, :, :],
+                colors_precomp=colors_precomp[visible, :] if colors_precomp is not None else None,
+                opacities=opacity[visible, :],
+                scales=scales[visible, :] if scales is not None else None,
+                rotations=rotations[visible, :] if rotations is not None else None,
+                cov3D_precomp=cov3D_precomp[visible, :] if cov3D_precomp is not None else None,
+            )
+        # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+        # They will be excluded from value updates used in the splitting criteria.
+        return {
+            "render": rendered_image,
+            "viewspace_points": screenspace_points,
+            "visibility_filter": radii > 0,
+            "radii": radii,
+            "visible": visible
+        }
+
+    # convert indexed to non-indexed
+    def to_unindexed(self):
+        if self.color_index_mode == ColorMode.NOT_INDEXED:
+            return # nothing to do
+        assert self.is_gaussian_indexed and self.is_color_indexed
+        self._features_dc = nn.Parameter(self._features_dc[self._feature_indices, :, :], requires_grad=True)
+        self._features_rest = nn.Parameter(self._features_rest[self._feature_indices, :, :], requires_grad=True)
+        self._feature_indices = None
+        self._rotation = nn.Parameter(self._rotation[self._gaussian_indices, :], requires_grad=True)
+        self._scaling = nn.Parameter(self._scaling[self._gaussian_indices, :], requires_grad=True)
+        self._gaussian_indices = None
+        self.color_index_mode = ColorMode.NOT_INDEXED
+
+    # convert non-indexed to indexed (without compression)
+    def to_indexed(self):
+        if self.color_index_mode == ColorMode.ALL_INDEXED:
+            return # nothing to do
+        n = self._features_dc.shape[0]
+        dev = self._features_dc.device
+        self._feature_indices = nn.Parameter(torch.arange(0, n, dtype=torch.long, device=dev), requires_grad=False)
+        self._gaussian_indices = nn.Parameter(torch.arange(0, n, dtype=torch.long, device=dev), requires_grad=False)
+        self.color_index_mode = ColorMode.ALL_INDEXED
+        assert self.is_gaussian_indexed and self.is_color_indexed
+
+    def calc_importance(self, scene, pipeline_params: PipelineParams, use_gt=False):
+        cov3d_scaled = self.get_covariance().detach()
+        scaling_factor = self.get_scaling_factor.detach()
+        coeff = scaling_factor.square()
+        cov3d = (cov3d_scaled / coeff).requires_grad_(True)
+
+        accum1 = torch.zeros_like(self._features_dc).requires_grad_(False)
+        accum2 = torch.zeros_like(self._features_rest).requires_grad_(False)
+        accum3 = torch.zeros_like(cov3d).requires_grad_(False)
+        background = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
+
+        num_pixels = 0
+        iterator, name = scene.getSomeCameras()
+
+        # self._features_dc.retain_grad()
+        # self._features_rest.retain_grad()
+        # cov3d.retain_grad()
+
+        for camera in iterator:
+            self.zero_grad()  # all grads to zero
+            if cov3d.grad is not None:
+                cov3d.grad.zero_()
+            image = self.render(camera, pipeline_params, background, clamp_color=False, cov3d=cov3d * coeff)["render"]
+            # gradients are accumulated during cycle each time backward is called
+            if not use_gt:
+                image.sum().backward()
+            else:
+                lambda_dssim = 0.2
+                gt_image = camera.original_image.cuda()
+                loss = (1.0 - lambda_dssim) * l1_loss(image, gt_image) + lambda_dssim * (1.0 - ssim(image, gt_image))
+                loss.backward()
+
+            accum1 += torch.abs(self._features_dc.grad)
+            accum2 += torch.abs(self._features_rest.grad)
+            accum3 += torch.abs(cov3d.grad)
+            num_pixels += image.shape[1] * image.shape[2]
+
+        importance = torch.cat([accum1, accum2], 1).flatten(-2)
+        cov_grad = accum3
+        torch.cuda.empty_cache()
+        return importance / num_pixels, cov_grad / num_pixels
+
+    def to_compressed(self, scene, pipeline_params: PipelineParams, comp_params: CompressionParams):
+
+        color_importance, gaussian_sensitivity = self.calc_importance(scene, pipeline_params, use_gt=True)
+        with torch.no_grad():
+            color_importance_n = color_importance.amax(-1)
+            gaussian_importance_n = gaussian_sensitivity.amax(-1)
+
+            torch.cuda.empty_cache()
+
+            color_compression_settings = CompressionSettings(
+                codebook_size=comp_params.color_codebook_size,
+                importance_prune=comp_params.color_importance_prune,
+                importance_include=None,  # comp_params.color_importance_include,
+                importance_include_relative=0.9,
+                steps=int(comp_params.color_cluster_iterations),
+                decay=comp_params.color_decay,
+                batch_size=comp_params.color_batch_size,
+            )
+
+            gaussian_compression_settings = CompressionSettings(
+                codebook_size=comp_params.gaussian_codebook_size,
+                importance_prune=None,
+                importance_include=None,  # comp_params.gaussian_importance_include,#None
+                importance_include_relative=0.75,
+                steps=int(comp_params.gaussian_cluster_iterations),
+                decay=comp_params.gaussian_decay,
+                batch_size=comp_params.gaussian_batch_size,
+            )
+
+            compress_gaussians(self, color_importance_n, gaussian_importance_n,
+                               color_compression_settings if not comp_params.not_compress_color else None,
+                               gaussian_compression_settings if not comp_params.not_compress_gaussians else None,
+                               comp_params.color_compress_non_dir, prune_threshold=comp_params.prune_threshold)
+
+            # print(len(self._rotation), len(np.unique(self._gaussian_indices.detach().cpu().numpy())))
+
+        torch.cuda.empty_cache()
+
+        # if comp_params.finetune_iterations > 0:
+        #     finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1],
+        #              debug_from=-1)
 
     def _sort_morton(self):
         with torch.no_grad():
@@ -794,25 +1027,14 @@ class GaussianModel:
             self._xyz = nn.Parameter(self._xyz[mask], requires_grad=True)
             self._opacity = nn.Parameter(self._opacity[mask], requires_grad=True)
             if self._scaling_factor is not None:
-                self._scaling_factor = nn.Parameter(
-                    self._scaling_factor[mask], requires_grad=True
-                )
-
+                self._scaling_factor = nn.Parameter(self._scaling_factor[mask], requires_grad=True)
             if self.is_color_indexed:
-                self._feature_indices = nn.Parameter(
-                    self._feature_indices[mask], requires_grad=False
-                )
+                self._feature_indices = nn.Parameter(self._feature_indices[mask], requires_grad=False)
             else:
-                self._features_dc = nn.Parameter(
-                    self._features_dc[mask], requires_grad=True
-                )
-                self._features_rest = nn.Parameter(
-                    self._features_rest[mask], requires_grad=True
-                )
+                self._features_dc = nn.Parameter(self._features_dc[mask], requires_grad=True)
+                self._features_rest = nn.Parameter(self._features_rest[mask], requires_grad=True)
             if self.is_gaussian_indexed:
-                self._gaussian_indices = nn.Parameter(
-                    self._gaussian_indices[mask], requires_grad=False
-                )
+                self._gaussian_indices = nn.Parameter(self._gaussian_indices[mask], requires_grad=False)
             else:
                 self._scaling = nn.Parameter(self._scaling[mask], requires_grad=True)
                 self._rotation = nn.Parameter(self._rotation[mask], requires_grad=True)
@@ -1021,7 +1243,7 @@ class GaussianModel:
     def reset_opacity(self):
         # print("Resetting opacity")
         # print(self.get_opacity.min(), self.get_opacity.max(), '->')
-        opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity) * 0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
         # print('->', self._opacity.min(), self._opacity.max(), self.get_opacity.min(), self.get_opacity.max())

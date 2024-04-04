@@ -41,7 +41,7 @@ class ParamGroup:
 
 
 class ModelParams(ParamGroup):
-    def __init__(self, parser, sentinel=False):
+    def __init__(self, parser=None, sentinel=False):
         self.sh_degree = 3
         self._source_path = ""
         self._model_path = ""
@@ -50,24 +50,40 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
-        super().__init__(parser, "Loading Parameters", sentinel)
+        if parser is not None:
+            self.has_parser = True
+            super().__init__(parser, "Loading Parameters", sentinel)
+        else:
+            self.has_parser = False
 
-    def extract(self, args):
-        g = super().extract(args)
+
+    def extract(self, args=None):
+        if not self.has_parser:
+            upd_dict = dict()
+            for key, value in vars(self).items():
+                if key.startswith("_"):
+                    key = key[1:]
+                upd_dict[key] = value
+            for key, value in upd_dict.items():
+                self.__dict__[key] = value
+            g = self
+        else:
+            g = super().extract(args)
         g.source_path = os.path.abspath(g.source_path)
         return g
 
 
 class PipelineParams(ParamGroup):
-    def __init__(self, parser):
+    def __init__(self, parser=None):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
-        super().__init__(parser, "Pipeline Parameters")
+        if parser is not None:
+            super().__init__(parser, "Pipeline Parameters")
 
 
 class CompressionParams(ParamGroup):
-    def __init__(self, parser):
+    def __init__(self, parser=None):
         self.load_iteration = -1
         self.finetune_iterations = 5000
 
@@ -93,11 +109,12 @@ class CompressionParams(ParamGroup):
 
         self.output_vq = "./eval_vq"
         self.start_checkpoint = ""
-        super().__init__(parser, "Compression Parameters")
+        if parser is not None:
+            super().__init__(parser, "Compression Parameters")
 
 
 class OptimizationParams(ParamGroup):
-    def __init__(self, parser):
+    def __init__(self, parser=None):
         self.iterations = 30_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
@@ -116,7 +133,8 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.random_background = False
         self.not_quantization_aware = False
-        super().__init__(parser, "Optimization Parameters")
+        if parser is not None:
+            super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser: ArgumentParser,cmd=None):
     cmdlne_string = sys.argv[1:] if cmd is None else cmd

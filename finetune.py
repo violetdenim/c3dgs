@@ -2,14 +2,12 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss,  ssim
-from gaussian_renderer import render
 from scene import Scene
 import uuid
 from tqdm import tqdm
-from utils.image_utils import psnr
 from argparse import  Namespace
 
-def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from):
+def finetune(scene: Scene, dataset, opt, comp, pipe, debug_from):
     prepare_output_and_logger(comp.output_vq, dataset)
 
     first_iter = scene.loaded_iter
@@ -39,17 +37,15 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background)
+        render_pkg = scene.gaussians.render(viewpoint_cam, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = (
             render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"],
         )
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (
-            1.0 - ssim(image, gt_image)
-        )
+
+        loss = (1.0 - opt.lambda_dssim) * l1_loss(image, gt_image) + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss.backward()
 
         iter_end.record()

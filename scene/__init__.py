@@ -15,7 +15,7 @@ import json
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
-from scene.gaussian_model_src import GaussianModel as GaussianModelSrc
+# from scene.gaussian_model_src import GaussianModel as GaussianModelSrc
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 import shutil
@@ -23,9 +23,9 @@ from glob import glob
 
 class Scene:
 
-    gaussians : GaussianModel | GaussianModelSrc
+    gaussians : GaussianModel #| GaussianModelSrc
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel | GaussianModelSrc, load_iteration=None, shuffle=True, \
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, \
                  resolution_scales=[1.0], override_quantization=False, save_memory=False):
         """b
         :param path: Path to colmap scene main folder.
@@ -105,6 +105,12 @@ class Scene:
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+
+    def getSomeCameras(self, scale=1.0):
+        ret = self.getTestCameras(scale)
+        if len(ret) > 0:
+            return ret, "test"
+        return self.getTrainCameras(scale), "train"
 
     def __len__(self, scale=1.0):
         return len(self.train_cameras[scale]) + len(self.test_cameras[scale])
