@@ -129,6 +129,21 @@ class GaussianModel:
 
         self.setup_functions(use_factor_scaling)
 
+    def check_state(self):
+        n = self._xyz.shape[0]
+        assert (self._opacity.shape[0] == n)
+
+        if self.is_gaussian_indexed:
+            assert (self._gaussian_indices.shape[0] == n)
+        else:
+            assert (self._rotation.shape[0] == n)
+            assert (self._scaling.shape[0] == n)
+
+        if self.is_color_indexed:
+            assert (self._feature_indices.shape[0] == n)
+        else:
+            assert (self._features_dc.shape[0] == n)
+            assert (self._features_rest.shape[0] == n)
 
     def zero_grad(self):
         if self._xyz.grad is not None:
@@ -1073,42 +1088,77 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
-    def _prune_optimizer(self, mask):
+    def _prune_optimizer(self, mask, names=None):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            stored_state = self.optimizer.state.get(group['params'][0], None)
-            if stored_state is not None and len(stored_state["exp_avg"]) > 0:
-                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
-                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+            if names is None or group["name"] in names:
+                stored_state = self.optimizer.state.get(group['params'][0], None)
+                if stored_state is not None and len(stored_state["exp_avg"]) > 0:
+                    stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+                    stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
 
-                del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
-                self.optimizer.state[group['params'][0]] = stored_state
+                    del self.optimizer.state[group['params'][0]]
+                    group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+                    self.optimizer.state[group['params'][0]] = stored_state
 
-                optimizable_tensors[group["name"]] = group["params"][0]
-            else:
-                if len(group["params"][0]) > 0:
-                    group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
-                optimizable_tensors[group["name"]] = group["params"][0]
+                    optimizable_tensors[group["name"]] = group["params"][0]
+                else:
+                    if len(group["params"][0]) > 0:
+                        group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
+                    optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
     def prune_points(self, mask):
+        # valid corresponds to index array
+        # feat corresponds to features array
+        def calc_valid(n_feats, index, valid):
+            valid_ids_list = index[valid]
+            feat_valid = torch.zeros(n_feats, dtype=torch.bool, device=valid.device)
+            feat_valid[valid_ids_list] = True
+
+            unique_ids = torch.sort(torch.unique(valid_ids_list))[0]
+            index_map = torch.zeros(unique_ids[-1] + 1, dtype=index.dtype, device=index.device)
+            for i, u in enumerate(unique_ids):
+                index_map[u] = i
+            return feat_valid, index_map[valid_ids_list]
+
+
         valid_points_mask = ~mask
-        optimizable_tensors = self._prune_optimizer(valid_points_mask)
+        # prune_optimizer applies same mask on all inputs
+        # but we need to apply different criteria on features and scaling, when we have indices
+        names = set(group["name"] for group in self.optimizer.param_groups)
+        color_names = {"f_dc", "f_rest"}
+        gaus_names = {"scaling", "rotation"}
+        if self.is_color_indexed:
+            names -= color_names
+        if self.is_gaussian_indexed:
+            names -= gaus_names
+
+        optimizable_tensors = self._prune_optimizer(valid_points_mask, names=names)
+        if self.is_color_indexed:
+            # 1. prune only features, that has no indices
+            # 2. rebuild links (indices) after pruning
+            color_valid_points_mask, self._feature_indices = calc_valid(self._features_dc.shape[0], self._feature_indices, valid_points_mask)
+            optimizable_tensors.update(self._prune_optimizer(color_valid_points_mask, names=color_names))
+
+        if self.is_gaussian_indexed:
+            gaus_valid_points_mask, self._gaussian_indices = calc_valid(self._scaling.shape[0], self._gaussian_indices, valid_points_mask)
+            optimizable_tensors.update(self._prune_optimizer(gaus_valid_points_mask, names=gaus_names))
 
         self._xyz = optimizable_tensors["xyz"]
-        self._features_dc = optimizable_tensors["f_dc"]
-        self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
-        self._scaling = optimizable_tensors["scaling"]
         if self._scaling_factor is not None:
             self._scaling_factor = optimizable_tensors["scaling_factor"]
-        self._rotation = optimizable_tensors["rotation"]
-
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
-
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -1164,21 +1214,22 @@ class GaussianModel:
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
+
+        scaling = self.get_scaling #[n_init_points, 1]
+
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, #self.get_scaling_normalized,
-                                                        dim=1).values > self.percent_dense * scene_extent)
-        # print("densify_and_split: ", selected_pts_mask.sum())
-
-        #stds = self.get_scaling_normalized[selected_pts_mask].repeat(N, 1)
-        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
+                                              torch.max(scaling, dim=1).values > self.percent_dense * scene_extent)
+        stds = scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+
+        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
 
         new_scaling = self.scaling_inverse_activation(stds / (0.8 * N))
         if self._scaling_factor is not None:
@@ -1186,59 +1237,85 @@ class GaussianModel:
         else:
             new_scaling_factor = None
 
-        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
-        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
-        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1) if len(self._features_rest) > 0 else self._features_rest
+        rotation = self._rotation[self._gaussian_indices] if self.is_gaussian_indexed else self._rotation
+        new_rotation = rotation[selected_pts_mask].repeat(N, 1)
 
-        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
+        features_dc = self._features_dc[self._feature_indices] if self.is_color_indexed else self._features_dc
+        new_features_dc = features_dc[selected_pts_mask].repeat(N, 1, 1)
+
+        if len(self._features_rest) > 0:
+            features_rest = self._features_rest[self._feature_indices] if self.is_color_indexed else self._features_rest
+            new_features_rest = features_rest[selected_pts_mask].repeat(N, 1, 1)
+        else:
+            new_features_rest = self._features_rest
+
+        n_new_points = selected_pts_mask.sum() * N
+
+        if self.is_gaussian_indexed: # add new unique indices, linked to newly created gaussians
+            new_gaussian_indices = torch.arange(n_new_points, dtype=self._gaussian_indices.dtype, device=self._gaussian_indices.device) + len(self._gaussian_indices)
+            self._gaussian_indices = torch.cat((self._gaussian_indices, new_gaussian_indices), dim=0)
+
+        if self.is_color_indexed:
+            new_feature_indices = torch.arange(n_new_points, dtype=self._feature_indices.dtype, device=self._feature_indices.device) + len(self._feature_indices)
+            self._feature_indices = torch.cat((self._feature_indices, new_feature_indices), dim=0)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling,
                                    new_scaling_factor,
                                    new_rotation)
+        self.check_state()
 
-        prune_filter = torch.cat(
-            (selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(
-                                                  self.get_scaling, #self.get_scaling_normalized,
-                                                        dim=1).values <= self.percent_dense * scene_extent)
+                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent)
         # print("densify_and_clone: ", selected_pts_mask.sum())
         new_xyz = self._xyz[selected_pts_mask]
-        new_features_dc = self._features_dc[selected_pts_mask]
-        new_features_rest = self._features_rest[selected_pts_mask] if len(self._features_rest) > 0 else self._features_rest
         new_opacities = self._opacity[selected_pts_mask]
-        new_scaling = self._scaling[selected_pts_mask]
         if self._scaling_factor is not None:
             new_scaling_factor = self._scaling_factor[selected_pts_mask]
         else:
             new_scaling_factor = None
+
+        new_features_dc = self._features_dc[selected_pts_mask]
+        new_features_rest = self._features_rest[selected_pts_mask] if len(self._features_rest) > 0 else self._features_rest
+
+        new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
+
+        n_new_points = selected_pts_mask.sum()
+        if self.is_gaussian_indexed:
+            new_gaussian_indices = torch.arange(n_new_points, dtype=self._gaussian_indices.dtype,
+                                                device=self._gaussian_indices.device) + len(self._gaussian_indices)
+            self._gaussian_indices = torch.cat((self._gaussian_indices, new_gaussian_indices), dim=0)
+
+        if self.is_color_indexed:
+            new_feature_indices = torch.arange(n_new_points, dtype=self._feature_indices.dtype,
+                                               device=self._feature_indices.device) + len(self._feature_indices)
+            self._feature_indices = torch.cat((self._feature_indices, new_feature_indices), dim=0)
+
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, \
-                                   new_scaling,
-                                   new_scaling_factor,
-                                   new_rotation)
+                                   new_scaling, new_scaling_factor, new_rotation)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         self.densify_and_clone(grads, max_grad, extent)
+        self.check_state()
         self.densify_and_split(grads, max_grad, extent)
+        self.check_state()
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
-        # print("densify_and_prune 1: ", prune_mask.sum())
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
-            #big_points_ws = self.get_scaling_normalized.max(dim=1).values > 0.1 * extent
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            # print("densify_and_prune 2: ", big_points_vs.sum(), big_points_ws.sum())
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
+        self.check_state()
         torch.cuda.empty_cache()
 
     def reset_opacity(self):

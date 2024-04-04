@@ -1,22 +1,15 @@
 import os
-import pickle
 import shutil
 
 import torch
-from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render
 import sys
 from scene import Scene, GaussianModel as GaussianModel
-from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
-
-import numpy as np
-from _compress import calc_importance
 
 def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelineParams, \
              testing_iterations, saving_iterations):
@@ -26,6 +19,10 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
     # it's important to run this after scene initialization, not before!
     gaussians.training_setup(opt)
     gaussians.update_learning_rate(0)
+
+    # experiment: train in indexed mode
+    gaussians.to_indexed()
+
 
     bg = torch.rand((3), device="cuda") if opt.random_background else torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
 
@@ -47,36 +44,24 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
     degree_up = calc_epoch(1000)
 
     iteration = 0
+
     for epoch in (progress_bar := tqdm(range(epoch_count), desc="Training progress")):
         epoch_stats = {"loss": 0.0, "ssim": 0.0, "PSNR": 0.0, "N": 0}
+        # dc_gradient_accum = torch.zeros_like(gaussians._features_dc).requires_grad_(False)
+        # rest_gradient_accum = torch.zeros_like(gaussians._features_rest).requires_grad_(False)
+        # cov3d_gradient_accum = torch.zeros_like(cov3d).requires_grad_(False)
 
-        scaling = gaussians.scaling_qa(gaussians.scaling_activation(gaussians._scaling.detach()))
-        cov3d = gaussians.covariance_activation(scaling, 1.0, gaussians.get_rotation.detach(), True).requires_grad_(
-            True)
-        scaling_factor = gaussians.scaling_factor_activation(
-            gaussians.scaling_factor_qa(gaussians._scaling_factor.detach()))
-
-        dc_gradient_accum = torch.zeros_like(gaussians._features_dc)
-        rest_gradient_accum = torch.zeros_like(gaussians._features_rest)
-        cov3d_gradient_accum = torch.zeros_like(cov3d)
-
-        gaussians._features_dc.retain_grad()
-        gaussians._features_rest.retain_grad()
-        cov3d.retain_grad()
-
-        for viewpoint_cam in scene.getTrainCameras():
-            if gaussians._features_dc.grad is not None:
-                gaussians._features_dc.grad.zero_()
-            if gaussians._features_rest.grad is not None:
-                gaussians._features_rest.grad.zero_()
-            if cov3d.grad is not None:
-                cov3d.grad.zero_()
-
+        num_pixels = 0
+        for viewpoint_cam in scene.getTrainCameras():#[::10]:
             gaussians.update_learning_rate(iteration)
 
             # render_pkg = render(viewpoint_cam, gaussians, pipeline, bg)
-            cov3d_scaled = cov3d * scaling_factor.square()
-            render_pkg = render(viewpoint_cam, gaussians, pipeline_params, bg, clamp_color=False, cov3d=cov3d_scaled)
+            cov3d_scaled = gaussians.get_covariance().detach()
+            scaling_factor = gaussians.get_scaling_factor.detach()
+            coeff = scaling_factor.square()
+            cov3d = (cov3d_scaled / coeff).requires_grad_(True)
+
+            render_pkg = gaussians.render(viewpoint_cam, pipeline_params, bg, clamp_color=False, cov3d=cov3d * coeff)
 
             image, viewspace_point_tensor, visibility_filter, radii, visible = (
                 render_pkg["render"], render_pkg["viewspace_points"], \
@@ -88,11 +73,11 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
             loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
             loss.backward()
 
-            _vis_filter = torch.zeros_like(visible)
-            _vis_filter[visible] = visibility_filter
-            dc_gradient_accum[_vis_filter, ...] += torch.abs(gaussians._features_dc.grad[_vis_filter, ...])
-            rest_gradient_accum[_vis_filter, ...] += torch.abs(gaussians._features_rest.grad[_vis_filter, ...])
-            cov3d_gradient_accum[_vis_filter, ...] += torch.abs(cov3d.grad[_vis_filter, ...])
+            # _vis_filter = torch.zeros_like(visible)
+            # _vis_filter[visible] = visibility_filter
+            # dc_gradient_accum[_vis_filter, ...] += torch.abs(gaussians._features_dc.grad[_vis_filter, ...])
+            # rest_gradient_accum[_vis_filter, ...] += torch.abs(gaussians._features_rest.grad[_vis_filter, ...])
+            # cov3d_gradient_accum[_vis_filter, ...] += torch.abs(cov3d.grad[_vis_filter, ...])
 
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -107,6 +92,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
             progress_bar.set_postfix(iteration_stats)
             gaussians.optimizer.step()
             gaussians.optimizer.zero_grad(set_to_none=True)
+            # cov3d.grad.zero_()
 
             if epoch < densify_until_epoch:
                 # Keep track of max radii in image-space for pruning
@@ -116,11 +102,10 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
                 gaussians.add_densification_stats(viewspace_point_tensor, _vis_filter)
             iteration += 1
 
-        importance = torch.cat([dc_gradient_accum, rest_gradient_accum], 1).flatten(-2)
-        deriv_color_importance, deriv_gaussian_sensitivity = importance.detach() / data_count, cov3d_gradient_accum.detach() / data_count
-        print('1', deriv_color_importance.max(), deriv_gaussian_sensitivity.max(), deriv_color_importance.shape, deriv_gaussian_sensitivity.shape)
-        color_importance, gaussian_sensitivity = calc_importance(gaussians, scene, pipeline, silent=True)
-        print('2', color_importance.max(), gaussian_sensitivity.max(), color_importance.shape, gaussian_sensitivity.shape)
+            num_pixels += image.shape[1] * image.shape[2]
+
+        # importance = torch.cat([dc_gradient_accum, rest_gradient_accum], 1).flatten(-2) / num_pixels
+        # gaussian_sensitivity = cov3d_gradient_accum.detach() / num_pixels
 
         if epoch in testing_epochs:
             print(f"\n[EPOCH {epoch}] " + ",".join([f"{k}: {v / data_count:.4f}" for k, v in epoch_stats.items()]))
@@ -135,13 +120,9 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
                     # print(f"\n[EPOCH {epoch}] Dense and prune")
                     size_threshold = 20 if epoch > opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-
                 if epoch > 0 and epoch % opacity_reset_interval == 0:
                     # print(f"\n[EPOCH {epoch}] Resetting opacity")
                     gaussians.reset_opacity()
-
-
-
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if epoch % degree_up == 0:
             gaussians.oneupSHdegree()
