@@ -946,6 +946,7 @@ class GaussianModel:
         return importance / num_pixels, cov_grad / num_pixels
 
     def to_compressed(self, scene, pipeline_params: PipelineParams, comp_params: CompressionParams):
+        self.to_unindexed() # always unwrap
 
         color_importance, gaussian_sensitivity = self.calc_importance(scene, pipeline_params, use_gt=True)
         with torch.no_grad():
