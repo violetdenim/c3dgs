@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch_scatter import scatter
 from typing import Tuple, Optional
-from tqdm import trange
+from tqdm import tqdm
 import gc
 # from scene.gaussian_model import GaussianModel
 from utils.splats import to_full_cov, extract_rot_scale
@@ -13,21 +13,12 @@ from weighted_distance._C import weightedDistance
 
 
 class VectorQuantize(nn.Module):
-    def __init__(
-            self,
-            channels: int,
-            codebook_size: int = 2 ** 12,
-            decay: float = 0.5,
-    ) -> None:
+    def __init__(self, channels: int, codebook_size: int = 2 ** 12, decay: float = 0.5) -> None:
         super().__init__()
         self.decay = decay
-        self.codebook = nn.Parameter(
-            torch.empty(codebook_size, channels), requires_grad=False
-        )
+        self.codebook = nn.Parameter(torch.empty(codebook_size, channels), requires_grad=False)
         nn.init.kaiming_uniform_(self.codebook)
-        self.entry_importance = nn.Parameter(
-            torch.zeros(codebook_size), requires_grad=False
-        )
+        self.entry_importance = nn.Parameter(torch.zeros(codebook_size), requires_grad=False)
         self.eps = 1e-5
 
     def uniform_init(self, x: torch.Tensor):
@@ -37,33 +28,13 @@ class VectorQuantize(nn.Module):
     def update(self, x: torch.Tensor, importance: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             min_dists, idx = weightedDistance(x.detach(), self.codebook.detach())
-            acc_importance = scatter(
-                importance, idx, 0, reduce="sum", dim_size=self.codebook.shape[0]
-            )
-
+            acc_importance = scatter(importance, idx, 0, reduce="sum", dim_size=self.codebook.shape[0])
             ema_inplace(self.entry_importance, acc_importance, self.decay)
-
-            codebook = scatter(
-                x * importance[:, None],
-                idx,
-                0,
-                reduce="sum",
-                dim_size=self.codebook.shape[0],
-            )
-
-            ema_inplace(
-                self.codebook,
-                codebook / (acc_importance[:, None] + self.eps),
-                self.decay,
-            )
-
+            codebook = scatter(x * importance[:, None], idx,0, reduce="sum", dim_size=self.codebook.shape[0])
+            ema_inplace(self.codebook, codebook / (acc_importance[:, None] + self.eps), self.decay)
             return min_dists
 
-    def forward(
-            self,
-            x: torch.Tensor,
-            return_dists: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    def forward(self, x: torch.Tensor, return_dists: bool = False) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         min_dists, idx = weightedDistance(x.detach(), self.codebook.detach())
         if return_dists:
             return self.codebook[idx], idx, min_dists
@@ -83,18 +54,18 @@ def vq_features(
         steps: int = 1000,
         decay: float = 0.8,
         scale_normalize: bool = False,
+        silent: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     importance_n = importance / importance.max()
-    vq_model = VectorQuantize(
-        channels=features.shape[-1],
-        codebook_size=codebook_size,
-        decay=decay,
-    ).to(device=features.device)
 
+    vq_model = VectorQuantize(channels=features.shape[-1], codebook_size=codebook_size, decay=decay).to(device=features.device)
     vq_model.uniform_init(features)
 
     errors = []
-    for i in trange(steps):
+    diap = range(steps)
+    if not silent:
+        diap = tqdm(diap)
+    for _ in diap:
         batch = torch.randint(low=0, high=features.shape[0], size=[vq_chunk])
         vq_feature = features[batch]
         error = vq_model.update(vq_feature, importance=importance_n[batch]).mean().item()
@@ -104,7 +75,6 @@ def vq_features(
             # we devide by the trace to ensure that matrices have normalized eigenvalues / scales
             tr = vq_model.codebook[:, [0, 3, 5]].sum(-1)
             vq_model.codebook /= tr[:, None]
-
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -112,7 +82,8 @@ def vq_features(
     _, vq_indices = vq_model(features)
     torch.cuda.synchronize(device=vq_indices.device)
     end = time.time()
-    print(f"calculating indices took {end - start} seconds ")
+    if not silent:
+        print(f"calculating indices took {end - start} seconds ")
     return vq_model.codebook.data.detach(), vq_indices.detach()
 
 
@@ -125,13 +96,9 @@ def join_features(
     keep_features = all_features[keep_mask]
     compressed_features = torch.cat([codebook, keep_features], 0)
 
-    indices = torch.zeros(
-        len(all_features), dtype=torch.long, device=all_features.device
-    )
+    indices = torch.zeros(len(all_features), dtype=torch.long, device=all_features.device)
     indices[~keep_mask] = codebook_indices
-    indices[keep_mask] = torch.arange(len(keep_features), device=indices.device) + len(
-        codebook
-    )
+    indices[keep_mask] = torch.arange(len(keep_features), device=indices.device) + len(codebook)
 
     return compressed_features, indices
 
@@ -152,13 +119,11 @@ def compress_color(
         color_importance: torch.Tensor,
         color_comp: CompressionSettings,
         color_compress_non_dir: bool,
+        silent: bool,
 ):
     keep_mask = color_importance > color_comp.importance_include
-
-    print(
-        f"color keep: {keep_mask.float().mean() * 100:.2f}%"
-    )
-
+    if not silent:
+        print(f"color keep: {keep_mask.float().mean() * 100:.2f}%")
     vq_mask_c = ~keep_mask
 
     # remove zero sh component
@@ -169,45 +134,33 @@ def compress_color(
         n_sh_coefs = gaussians.get_features.shape[1] - 1
         color_features = gaussians.get_features[:, 1:].detach().flatten(-2)
     if vq_mask_c.any():
-        print("compressing color...")
-        color_codebook, color_vq_indices = vq_features(
-            color_features[vq_mask_c],
-            color_importance[vq_mask_c],
-            color_comp.codebook_size,
-            color_comp.batch_size,
-            color_comp.steps,
-        )
+        if not silent:
+            print("compressing color...")
+        color_codebook, color_vq_indices = vq_features( color_features[vq_mask_c], color_importance[vq_mask_c],
+            color_comp.codebook_size, color_comp.batch_size, color_comp.steps, silent=silent)
     else:
-        color_codebook = torch.empty(
-            (0, color_features.shape[-1]), device=color_features.device
-        )
-        color_vq_indices = torch.empty(
-            (0,), device=color_features.device, dtype=torch.long
-        )
+        color_codebook = torch.empty((0, color_features.shape[-1]), device=color_features.device)
+        color_vq_indices = torch.empty((0,), device=color_features.device, dtype=torch.long)
 
     all_features = color_features
-    compressed_features, indices = join_features(
-        all_features, keep_mask, color_codebook, color_vq_indices
-    )
-
+    compressed_features, indices = join_features(all_features, keep_mask, color_codebook, color_vq_indices)
     gaussians.set_color_indexed(compressed_features.reshape(-1, n_sh_coefs, 3), indices)
-
 
 def compress_covariance(
         gaussians, #: GaussianModel,
         gaussian_importance: torch.Tensor,
         gaussian_comp: CompressionSettings,
+        silent: bool
 ):
     keep_mask_g = gaussian_importance > gaussian_comp.importance_include
-
     vq_mask_g = ~keep_mask_g
-
-    print(f"gaussians keep: {keep_mask_g.float().mean() * 100:.2f}%")
-
+    if not silent:
+        print(f"gaussians keep: {keep_mask_g.float().mean() * 100:.2f}%")
     covariance = gaussians.get_normalized_covariance(strip_sym=True).detach()
 
     if vq_mask_g.any():
-        print("compressing gaussian splats...")
+        if not silent:
+            print("compressing gaussian splats...")
         cov_codebook, cov_vq_indices = vq_features(
             covariance[vq_mask_g],
             gaussian_importance[vq_mask_g],
@@ -215,6 +168,7 @@ def compress_covariance(
             gaussian_comp.batch_size,
             gaussian_comp.steps,
             scale_normalize=True,
+            silent=silent
         )
     else:
         cov_codebook = torch.empty(
@@ -230,7 +184,6 @@ def compress_covariance(
     )
 
     rot_vq, scale_vq = extract_rot_scale(to_full_cov(compressed_cov))
-
     gaussians.set_gaussian_indexed(
         rot_vq.to(compressed_cov.device),
         scale_vq.to(compressed_cov.device),
@@ -246,30 +199,25 @@ def compress_gaussians(
         gaussian_comp: Optional[CompressionSettings],
         color_compress_non_dir: bool,
         prune_threshold: float = 0.,
+        silent: bool = False,
 ):
     with torch.no_grad():
         if prune_threshold >= 0:
             non_prune_mask = color_importance > prune_threshold
-            print(f"prune: {(1 - non_prune_mask.float().mean()) * 100:.2f}%")
+            if not silent:
+                print(f"prune: {(1 - non_prune_mask.float().mean()) * 100:.2f}%")
             gaussians.mask_splats(non_prune_mask)
             gaussian_importance = gaussian_importance[non_prune_mask]
             color_importance = color_importance[non_prune_mask]
         if color_comp.importance_include is None:
             color_comp.importance_include = torch.quantile(color_importance, color_comp.importance_include_relative).item()
-            print(f"Setting color threshold to {color_comp.importance_include}")
+            if not silent:
+                print(f"Setting color threshold to {color_comp.importance_include}")
         if gaussian_comp.importance_include is None:
             gaussian_comp.importance_include = torch.quantile(gaussian_importance, gaussian_comp.importance_include_relative).item()
-            print(f"Setting gaussian threshold to {gaussian_comp.importance_include}")
+            if not silent:
+                print(f"Setting gaussian threshold to {gaussian_comp.importance_include}")
         if color_comp is not None:
-            compress_color(
-                gaussians,
-                color_importance,
-                color_comp,
-                color_compress_non_dir,
-            )
+            compress_color(gaussians, color_importance, color_comp, color_compress_non_dir, silent=silent)
         if gaussian_comp is not None:
-            compress_covariance(
-                gaussians,
-                gaussian_importance,
-                gaussian_comp,
-            )
+            compress_covariance(gaussians, gaussian_importance, gaussian_comp, silent=silent)
