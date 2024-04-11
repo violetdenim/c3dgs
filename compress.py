@@ -276,7 +276,7 @@ def run_vq(
         start_time = time.time()
         finetune(scene, model_params, optim_params, comp_params, pipeline_params, debug_from=-1)
         end_time = time.time()
-        timings["finetune"]=end_time-start_time
+        timings["finetune"] = end_time - start_time
 
         # %%
     out_file = path.join(
@@ -297,7 +297,8 @@ def run_vq(
     print("evaluating...")
     metrics = render_and_eval(gaussians, scene, model_params, pipeline_params, iteration)
     metrics["size"] = file_size
-    # print(metrics)
+    print("N", gaussians._xyz.shape[0], metrics)
+
     with open(f"{comp_params.output_vq}/results.json", "w") as f:
         json.dump({f"ours_{iteration}": metrics}, f, indent=4)
 

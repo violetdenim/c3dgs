@@ -1044,8 +1044,9 @@ class GaussianModel:
         with torch.no_grad():
             self._xyz = nn.Parameter(self._xyz[mask], requires_grad=True)
             self._opacity = nn.Parameter(self._opacity[mask], requires_grad=True)
-            self.xyz_gradient_accum = self.xyz_gradient_accum[mask]
-            self.denom = self.denom[mask]
+            if len(self.xyz_gradient_accum) > 0:
+                self.xyz_gradient_accum = self.xyz_gradient_accum[mask.to(self.xyz_gradient_accum.device)]
+                self.denom = self.denom[mask.to(self.denom.device)]
 
             if self._scaling_factor is not None:
                 self._scaling_factor = nn.Parameter(self._scaling_factor[mask], requires_grad=True)

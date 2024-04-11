@@ -28,26 +28,25 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
     viewpoint_stack = None
     ema_loss_for_log = 0.0
     data_count = len(scene)
-    epoch_count = opt.iterations // data_count
+    epoch_count = 10 # opt.iterations // data_count
+    epoch_compression = 4
 
     calc_epoch = lambda i: max(1, i * epoch_count // opt.iterations)
 
     # recalculate all settings in terms of epoch instead of iterations
-    saving_epochs = [calc_epoch(iter) for iter in saving_iterations]
-    testing_epochs = [calc_epoch(iter) for iter in testing_iterations]
+    saving_epochs = range(epoch_count)
+    testing_epochs = range(epoch_count)
 
-    densify_until_epoch = calc_epoch(opt.densify_until_iter)
-    densify_from_epoch = calc_epoch(opt.densify_from_iter)
-    densification_interval = calc_epoch(opt.densification_interval)
-    opacity_reset_interval = calc_epoch(opt.opacity_reset_interval)
-    degree_up = calc_epoch(1000)
+    degree_up = 1
 
     iteration = 0
+    #DEBUG ONLY!
+    data_step = 10
 
     for epoch in (progress_bar := tqdm(range(epoch_count), desc="Training progress")):
         epoch_stats = {"loss": 0.0, "ssim": 0.0, "PSNR": 0.0, "N": 0}
 
-        calc_compression_stats = (epoch % 5 == 0)
+        calc_compression_stats = (epoch == epoch_compression)
         if calc_compression_stats:
             gaussians.to_unindexed()
             dc_gradient_accum       = torch.zeros_like(gaussians._features_dc).requires_grad_(False)
@@ -55,7 +54,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
             cov3d_gradient_accum    = torch.zeros_like(gaussians.get_covariance()).requires_grad_(False)
 
         num_pixels = 0
-        for viewpoint_cam in scene.getTrainCameras()[::10]:
+        for viewpoint_cam in scene.getTrainCameras()[::data_step]:
             gaussians.update_learning_rate(iteration)
 
             # render_pkg = render(viewpoint_cam, gaussians, pipeline, bg)
@@ -98,12 +97,6 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
             gaussians.optimizer.zero_grad(set_to_none=True)
             cov3d.grad.zero_()
 
-            if epoch < densify_until_epoch:
-                # Keep track of max radii in image-space for pruning
-                _vis_filter = torch.zeros_like(visible)
-                _vis_filter[visible] = visibility_filter
-                gaussians.max_radii2D[_vis_filter] = torch.max(gaussians.max_radii2D[_vis_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, _vis_filter)
             iteration += 1
 
             num_pixels += image.shape[1] * image.shape[2]
@@ -151,23 +144,10 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
         # gaussians.check_state()
 
         if epoch in testing_epochs:
-            print(f"\n[EPOCH {epoch}] " + ",".join([f"{k}: {v:.4f}" for k, v in epoch_stats.items()]))
+            print(f"\n[EPOCH {epoch}] " + ",".join([f"{k}: {v/(data_count/data_step):.4f}" for k, v in epoch_stats.items()]))
         with torch.no_grad():
             if epoch in saving_epochs:
-                # print(f"\n[EPOCH {epoch}] Saving Gaussians")
                 scene.save(epoch)
-
-            # Densification
-            if epoch < densify_until_epoch:
-                if epoch > densify_from_epoch and epoch % densification_interval == 0:
-                    # print(f"\n[EPOCH {epoch}] Dense and prune")
-                    size_threshold = 20 if epoch > opacity_reset_interval else None
-                    print('Densifying')
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                    gaussians.check_state()
-                if epoch > 0 and epoch % opacity_reset_interval == 0:
-                    # print(f"\n[EPOCH {epoch}] Resetting opacity")
-                    gaussians.reset_opacity()
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if epoch % degree_up == 0:
             gaussians.oneupSHdegree()
