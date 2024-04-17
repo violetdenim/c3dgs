@@ -73,12 +73,14 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, sh_degree: int, quantization=True, use_factor_scaling=True):
+    def __init__(self, sh_degree: int, quantization=True, use_factor_scaling=True, device="cuda"):
+        self.device = torch.device(device)
+
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
-        self._features_rest = torch.empty(0, device='cuda', requires_grad=True)
+        self._features_rest = torch.empty(0, device=self.device, requires_grad=True)
         self._scaling = torch.empty(0)
         if use_factor_scaling:
             self._scaling_factor = torch.empty(0)
@@ -100,15 +102,15 @@ class GaussianModel:
         self.quantization = quantization
         self.color_index_mode = ColorMode.NOT_INDEXED
 
-        self.features_dc_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
-        self.features_dc_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
-        self.features_rest_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
-        self.features_rest_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
-        self.opacity_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
-        self.scaling_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
+        self.features_dc_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).to(self.device)
+        self.features_dc_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).to(self.device)
+        self.features_rest_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).to(self.device)
+        self.features_rest_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).to(self.device)
+        self.opacity_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).to(self.device)
+        self.scaling_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).to(self.device)
         if use_factor_scaling:
-            self.scaling_factor_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
-        self.rotation_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
+            self.scaling_factor_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).to(self.device)
+        self.rotation_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).to(self.device)
         self.xyz_qa = FakeQuantizationHalf.apply
 
         if not self.quantization:
@@ -285,8 +287,8 @@ class GaussianModel:
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
 
         l = [
             {"params": [self._xyz], "lr": training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz", },
@@ -447,9 +449,9 @@ class GaussianModel:
             scales = np.zeros((n_points, len(scale_names)))
             for idx, attr_name in enumerate(scale_names):
                 scales[:, idx] = np.asarray(vertices[attr_name])
-            scaling = torch.tensor(scales, dtype=torch.float, device="cuda")
+            scaling = torch.tensor(scales, dtype=torch.float, device=self.device)
         else:
-            dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(xyz).float().cuda()), 0.0000001)
+            dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(xyz).float().to(self.device)), 0.0000001)
             scaling = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)#.detach().cpu().numpy()
 
         rot_names = [p for p in keys if p.startswith("rot")]
@@ -463,19 +465,19 @@ class GaussianModel:
             rots[:, 0] = 1
 
         self._xyz = nn.Parameter(
-            torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True)
+            torch.tensor(xyz, dtype=torch.float, device=self.device).requires_grad_(True)
         )
         self._features_dc = nn.Parameter(
-            torch.tensor(features_dc, dtype=torch.float, device="cuda")
+            torch.tensor(features_dc, dtype=torch.float, device=self.device)
             .transpose(1, 2).contiguous().requires_grad_(True)
         )
         self._features_rest = nn.Parameter(
-            torch.tensor(features_extra, dtype=torch.float, device="cuda")
+            torch.tensor(features_extra, dtype=torch.float, device=self.device)
             .transpose(1, 2).contiguous().requires_grad_(True)
         )
 
         self._opacity = nn.Parameter(
-            torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True)
+            torch.tensor(opacities, dtype=torch.float, device=self.device).requires_grad_(True)
         )
 
         if self._scaling_factor is not None:
@@ -490,8 +492,8 @@ class GaussianModel:
         else:
             self._scaling = nn.Parameter(scaling.requires_grad_(True))
 
-        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
-        self.max_radii2D = torch.zeros((n_points), device="cuda")
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device=self.device).requires_grad_(True))
+        self.max_radii2D = torch.zeros((n_points), device=self.device)
 
 
     def save_npz(
@@ -628,14 +630,14 @@ class GaussianModel:
 
         # load position
         self._xyz = nn.Parameter(
-            torch.from_numpy(state_dict["xyz"]).float().cuda(), requires_grad=True
+            torch.from_numpy(state_dict["xyz"]).float().to(self.device), requires_grad=True
         )
 
         # load color
         if quantization:
-            features_rest_q = torch.from_numpy(state_dict["features_rest"]).int().cuda()
-            features_rest_scale = torch.from_numpy(state_dict["features_rest_scale"]).cuda()
-            features_rest_zero_point = torch.from_numpy(state_dict["features_rest_zero_point"]).cuda()
+            features_rest_q = torch.from_numpy(state_dict["features_rest"]).int().to(self.device)
+            features_rest_scale = torch.from_numpy(state_dict["features_rest_scale"]).to(self.device)
+            features_rest_zero_point = torch.from_numpy(state_dict["features_rest_zero_point"]).to(self.device)
             features_rest = (features_rest_q - features_rest_zero_point) * features_rest_scale
             self._features_rest = nn.Parameter(features_rest, requires_grad=True)
             self.features_rest_qa.scale = features_rest_scale
@@ -643,11 +645,11 @@ class GaussianModel:
             self.features_rest_qa.activation_post_process.min_val = features_rest.min()
             self.features_rest_qa.activation_post_process.max_val = features_rest.max()
 
-            features_dc_q = torch.from_numpy(state_dict["features_dc"]).int().cuda()
-            features_dc_scale = torch.from_numpy(state_dict["features_dc_scale"]).cuda()
+            features_dc_q = torch.from_numpy(state_dict["features_dc"]).int().to(self.device)
+            features_dc_scale = torch.from_numpy(state_dict["features_dc_scale"]).to(self.device)
             features_dc_zero_point = torch.from_numpy(
                 state_dict["features_dc_zero_point"]
-            ).cuda()
+            ).to(self.device)
             features_dc = (features_dc_q - features_dc_zero_point) * features_dc_scale
             self._features_dc = nn.Parameter(features_dc, requires_grad=True)
 
@@ -656,16 +658,16 @@ class GaussianModel:
             self.features_dc_qa.activation_post_process.min_val = features_dc.min()
             self.features_dc_qa.activation_post_process.max_val = features_dc.max()
         else:
-            features_dc = torch.from_numpy(state_dict["features_dc"]).float().cuda()
-            features_rest = torch.from_numpy(state_dict["features_rest"]).float().cuda()
+            features_dc = torch.from_numpy(state_dict["features_dc"]).float().to(self.device)
+            features_rest = torch.from_numpy(state_dict["features_rest"]).float().to(self.device)
             self._features_dc = nn.Parameter(features_dc, requires_grad=True)
             self._features_rest = nn.Parameter(features_rest, requires_grad=True)
 
         # load opacity
         if quantization:
-            opacity_q = torch.from_numpy(state_dict["opacity"]).int().cuda()
-            opacity_scale = torch.from_numpy(state_dict["opacity_scale"]).cuda()
-            opacity_zero_point = torch.from_numpy(state_dict["opacity_zero_point"]).cuda()
+            opacity_q = torch.from_numpy(state_dict["opacity"]).int().to(self.device)
+            opacity_scale = torch.from_numpy(state_dict["opacity_scale"]).to(self.device)
+            opacity_zero_point = torch.from_numpy(state_dict["opacity_zero_point"]).to(self.device)
             opacity = (opacity_q - opacity_zero_point) * opacity_scale
             self._opacity = nn.Parameter(self.inverse_opacity_activation(opacity), requires_grad=True)
             self.opacity_qa.scale = opacity_scale
@@ -673,13 +675,13 @@ class GaussianModel:
             self.opacity_qa.activation_post_process.min_val = opacity.min()
             self.opacity_qa.activation_post_process.max_val = opacity.max()
         else:
-            self._opacity = nn.Parameter(torch.from_numpy(state_dict["opacity"]).float().cuda(), requires_grad=True)
+            self._opacity = nn.Parameter(torch.from_numpy(state_dict["opacity"]).float().to(self.device), requires_grad=True)
 
         # load scaling
         if quantization:
-            scaling_q = torch.from_numpy(state_dict["scaling"]).int().cuda()
-            scaling_scale = torch.from_numpy(state_dict["scaling_scale"]).cuda()
-            scaling_zero_point = torch.from_numpy(state_dict["scaling_zero_point"]).cuda()
+            scaling_q = torch.from_numpy(state_dict["scaling"]).int().to(self.device)
+            scaling_scale = torch.from_numpy(state_dict["scaling_scale"]).to(self.device)
+            scaling_zero_point = torch.from_numpy(state_dict["scaling_zero_point"]).to(self.device)
             scaling = (scaling_q - scaling_zero_point) * scaling_scale
             self._scaling = nn.Parameter(self.scaling_inverse_activation(scaling), requires_grad=True)
             self.scaling_qa.scale = scaling_scale
@@ -687,9 +689,9 @@ class GaussianModel:
             self.scaling_qa.activation_post_process.min_val = scaling.min()
             self.scaling_qa.activation_post_process.max_val = scaling.max()
 
-            scaling_factor_q = (torch.from_numpy(state_dict["scaling_factor"]).int().cuda())
-            scaling_factor_scale = torch.from_numpy(state_dict["scaling_factor_scale"]).cuda()
-            scaling_factor_zero_point = torch.from_numpy(state_dict["scaling_factor_zero_point"]).cuda()
+            scaling_factor_q = (torch.from_numpy(state_dict["scaling_factor"]).int().to(self.device))
+            scaling_factor_scale = torch.from_numpy(state_dict["scaling_factor_scale"]).to(self.device)
+            scaling_factor_zero_point = torch.from_numpy(state_dict["scaling_factor_zero_point"]).to(self.device)
             scaling_factor = (scaling_factor_q - scaling_factor_zero_point) * scaling_factor_scale
             self._scaling_factor = nn.Parameter(scaling_factor, requires_grad=True)
             self.scaling_factor_qa.scale = scaling_factor_scale
@@ -697,15 +699,15 @@ class GaussianModel:
             self.scaling_factor_qa.activation_post_process.min_val = scaling_factor.min()
             self.scaling_factor_qa.activation_post_process.max_val = scaling_factor.max()
         else:
-            self._scaling_factor = nn.Parameter(torch.from_numpy(state_dict["scaling_factor"]).float().cuda(),
+            self._scaling_factor = nn.Parameter(torch.from_numpy(state_dict["scaling_factor"]).float().to(self.device),
                 requires_grad=True)
-            self._scaling = nn.Parameter(torch.from_numpy(state_dict["scaling"]).float().cuda(),
+            self._scaling = nn.Parameter(torch.from_numpy(state_dict["scaling"]).float().to(self.device),
                 requires_grad=True)
         # load rotation
         if quantization:
-            rotation_q = torch.from_numpy(state_dict["rotation"]).int().cuda()
-            rotation_scale = torch.from_numpy(state_dict["rotation_scale"]).cuda()
-            rotation_zero_point = torch.from_numpy(state_dict["rotation_zero_point"]).cuda()
+            rotation_q = torch.from_numpy(state_dict["rotation"]).int().to(self.device)
+            rotation_scale = torch.from_numpy(state_dict["rotation_scale"]).to(self.device)
+            rotation_zero_point = torch.from_numpy(state_dict["rotation_zero_point"]).to(self.device)
             rotation = (rotation_q - rotation_zero_point) * rotation_scale
             self._rotation = nn.Parameter(rotation, requires_grad=True)
             self.rotation_qa.scale = rotation_scale
@@ -714,20 +716,20 @@ class GaussianModel:
             self.rotation_qa.activation_post_process.max_val = rotation.max()
         else:
             self._rotation = nn.Parameter(
-                torch.from_numpy(state_dict["rotation"]).float().cuda(),
+                torch.from_numpy(state_dict["rotation"]).float().to(self.device),
                 requires_grad=True,
             )
 
         if "gaussian_indices" in list(state_dict.keys()):
             self._gaussian_indices = nn.Parameter(
-                torch.from_numpy(state_dict["gaussian_indices"]).long().to("cuda"),
+                torch.from_numpy(state_dict["gaussian_indices"]).long().to(self.device),
                 requires_grad=False,
             )
 
         self.color_index_mode = ColorMode.NOT_INDEXED
         if "feature_indices" in list(state_dict.keys()):
             self._feature_indices = nn.Parameter(
-                torch.from_numpy(state_dict["feature_indices"]).long().to("cuda"),
+                torch.from_numpy(state_dict["feature_indices"]).long().to(self.device),
                 requires_grad=False,
             )
             self.color_index_mode = ColorMode.ALL_INDEXED
@@ -751,7 +753,7 @@ class GaussianModel:
         """
 
         # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-        screenspace_points = torch.zeros_like(self.get_xyz, dtype=self.get_xyz.dtype, requires_grad=True, device="cuda")
+        screenspace_points = torch.zeros_like(self.get_xyz, dtype=self.get_xyz.dtype, requires_grad=True, device=self.device)
         try:
             screenspace_points.retain_grad()
         except:
@@ -886,7 +888,7 @@ class GaussianModel:
         accum1 = torch.zeros_like(self._features_dc).requires_grad_(False)
         accum2 = torch.zeros_like(self._features_rest).requires_grad_(False)
         accum3 = torch.zeros_like(cov3d).requires_grad_(False)
-        background = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
+        background = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
 
         num_pixels = 0
         iterator, name = scene.getSomeCameras()
@@ -905,7 +907,7 @@ class GaussianModel:
                 image.sum().backward()
             else:
                 lambda_dssim = 0.2
-                gt_image = camera.original_image.cuda()
+                gt_image = camera.original_image.to(self.device)
                 loss = (1.0 - lambda_dssim) * l1_loss(image, gt_image) + lambda_dssim * (1.0 - ssim(image, gt_image))
                 loss.backward()
 
@@ -1181,9 +1183,9 @@ class GaussianModel:
 
         self._rotation = optimizable_tensors["rotation"]
 
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         if self.is_gaussian_indexed and self.is_color_indexed:
@@ -1204,7 +1206,7 @@ class GaussianModel:
             rotation = rotation[self._gaussian_indices]
 
         # Extract points that satisfy the gradient condition
-        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad = torch.zeros((n_init_points), device=self.device)
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
@@ -1213,7 +1215,7 @@ class GaussianModel:
         rotation = rotation[selected_pts_mask]
 
         stds = scaling.repeat(N, 1)
-        means = torch.zeros((stds.size(0), 3), device="cuda")
+        means = torch.zeros((stds.size(0), 3), device=self.device)
         samples = torch.normal(mean=means, std=stds)
 
         rots = build_rotation(rotation).repeat(N, 1, 1)
@@ -1248,7 +1250,7 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling,
                                    new_scaling_factor, new_rotation)
-        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device=self.device, dtype=bool)))
         self.prune_points(prune_filter)
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):

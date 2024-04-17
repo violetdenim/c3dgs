@@ -40,10 +40,10 @@ class Camera(nn.Module):
         self.trans = trans
         self.scale = scale
 
-        self.world_view_transform = torch.tensor(getWorld2View2(None, None, self.extrinsic, trans, scale)).transpose(0, 1).cuda()
+        self.world_view_transform = torch.tensor(getWorld2View2(None, None, self.extrinsic, trans, scale)).transpose(0, 1).to(data_device)
         self.projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, \
                                                      fovX=self.intrinsic[0, 0], fovY=self.intrinsic[1, 1], \
-                                                     z_sign=1.0).transpose(0, 1).cuda()
+                                                     z_sign=1.0).transpose(0, 1).to(data_device)
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
 
         self.camera_center = self.world_view_transform.inverse()[3, :3]

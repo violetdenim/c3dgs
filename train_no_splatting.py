@@ -14,8 +14,9 @@ from compression.vq import CompressionSettings, compress_gaussians
 from matplotlib import pyplot as plt
 
 def training(dataset: ModelParams, opt: OptimizationParams, comp_params: CompressionParams):
+    device = "cuda"
     prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True)
+    gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True, device=device)
     scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=True, save_memory=False)
     # it's important to run this after scene initialization, not before!
     gaussians.training_setup(opt)
@@ -23,7 +24,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     # experiment: train in indexed mode
     # gaussians.to_indexed()
 
-    bg = torch.rand((3), device="cuda") if opt.random_background else torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
+    bg = torch.rand((3), device=device) if opt.random_background else torch.tensor([0, 0, 0], dtype=torch.float32, device=device)
     viewpoint_stack = None
     ema_loss_for_log = 0.0
     data_count = len(scene)
@@ -97,7 +98,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
                     fig.canvas.flush_events()
 
             # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
+            gt_image = viewpoint_cam.original_image.to(device)
             l1_diff = l1_loss(image, gt_image)
             _ssim = ssim(image, gt_image)
             loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
