@@ -11,10 +11,9 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams, CompressionParams
 from compression.vq import CompressionSettings, compress_gaussians
+from matplotlib import pyplot as plt
 
-def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelineParams, \
-             comp_params: CompressionParams,
-             testing_iterations, saving_iterations):
+def training(dataset: ModelParams, opt: OptimizationParams, comp_params: CompressionParams):
     prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True)
     scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=True, save_memory=False)
@@ -28,10 +27,11 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
     viewpoint_stack = None
     ema_loss_for_log = 0.0
     data_count = len(scene)
-    epoch_count = 10 # opt.iterations // data_count
-    epoch_compression = 4
-
-    calc_epoch = lambda i: max(1, i * epoch_count // opt.iterations)
+    print(f"Data count: {data_count}")
+    epoch_count = 50 # opt.iterations // data_count
+    # epochs_splatting = [epoch_count-6]
+    epoch_compression = epoch_count-5
+    # calc_epoch = lambda i: max(1, i * epoch_count // opt.iterations)
 
     # recalculate all settings in terms of epoch instead of iterations
     saving_epochs = range(epoch_count)
@@ -41,19 +41,31 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
 
     iteration = 0
     #DEBUG ONLY!
-    data_step = 10
+    data_step = 1 #10
+
+    metric_keys = ["loss", "ssim", "PSNR", "N"]
+    full_stats = {k: [] for k in metric_keys}
+    image_axis = None
 
     for epoch in (progress_bar := tqdm(range(epoch_count), desc="Training progress")):
         epoch_stats = {"loss": 0.0, "ssim": 0.0, "PSNR": 0.0, "N": 0}
 
         calc_compression_stats = (epoch == epoch_compression)
         if calc_compression_stats:
-            gaussians.to_unindexed()
+            # gaussians.to_unindexed()
             dc_gradient_accum       = torch.zeros_like(gaussians._features_dc).requires_grad_(False)
             rest_gradient_accum     = torch.zeros_like(gaussians._features_rest).requires_grad_(False)
             cov3d_gradient_accum    = torch.zeros_like(gaussians.get_covariance()).requires_grad_(False)
 
         num_pixels = 0
+
+        # _psnr_stat = full_stats["PSNR"]
+        # if len(_psnr_stat) >= 3:
+        #     a, b, c = _psnr_stat[0], _psnr_stat[-2], _psnr_stat[-1]
+        #     relative_change = max(0, c - b) / max(1e-05, c - a)
+        #     data_step = min(max(int(relative_change * data_count), 1), data_step)
+        #     print(f"epoch = {epoch}, relative_change={relative_change} -> data_step={data_step}")
+
         for viewpoint_cam in scene.getTrainCameras()[::data_step]:
             gaussians.update_learning_rate(iteration)
 
@@ -69,6 +81,17 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
                 render_pkg["render"], render_pkg["viewspace_points"],
                 render_pkg["visibility_filter"], render_pkg["radii"],
                 render_pkg["visible"])
+            if iteration % data_count == 0:
+                show_image = image.detach().cpu().numpy().transpose(1, 2, 0)
+                # show_image = viewpoint_cam.original_image.detach().cpu().numpy().transpose(1, 2, 0)
+                if image_axis is None:
+                    plt.ion()
+                    fig = plt.figure()
+                    image_axis = plt.imshow(show_image)
+                else:
+                    image_axis.set_data(show_image)
+                    plt.draw()
+                    fig.canvas.flush_events()
 
             # Loss
             gt_image = viewpoint_cam.original_image.cuda()
@@ -76,9 +99,13 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
             _ssim = ssim(image, gt_image)
             loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
             loss.backward()
+            _vis_filter = torch.zeros_like(visible)
+            _vis_filter[visible] = visibility_filter
+            # Keep track of max radii in image-space for pruning
+            gaussians.max_radii2D[_vis_filter] = torch.max(gaussians.max_radii2D[_vis_filter], radii[visibility_filter])
+            gaussians.add_densification_stats(viewspace_point_tensor, _vis_filter)
+
             if calc_compression_stats:
-                _vis_filter = torch.zeros_like(visible)
-                _vis_filter[visible] = visibility_filter
                 dc_gradient_accum[_vis_filter, ...]     += torch.abs(gaussians._features_dc.grad[_vis_filter, ...])
                 rest_gradient_accum[_vis_filter, ...]   += torch.abs(gaussians._features_rest.grad[_vis_filter, ...])
                 cov3d_gradient_accum[_vis_filter, ...]  += torch.abs(cov3d.grad[_vis_filter, ...])
@@ -98,8 +125,11 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
             cov3d.grad.zero_()
 
             iteration += 1
-
             num_pixels += image.shape[1] * image.shape[2]
+
+        # if data_step == 1 and epoch < epoch_compression:#epoch in epochs_splatting:
+        #     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, 20)
+        #     gaussians.check_state()
 
         if calc_compression_stats:
             color_importance = torch.cat([dc_gradient_accum, rest_gradient_accum], 1).flatten(-2) / num_pixels
@@ -145,6 +175,10 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
 
         if epoch in testing_epochs:
             print(f"\n[EPOCH {epoch}] " + ",".join([f"{k}: {v/(data_count/data_step):.4f}" for k, v in epoch_stats.items()]))
+
+        for k, v in epoch_stats.items():
+            full_stats[k].append(v)
+
         with torch.no_grad():
             if epoch in saving_epochs:
                 scene.save(epoch)
@@ -220,7 +254,5 @@ if __name__ == "__main__":
     pipeline_params = pp.extract(args)
     comp_params = cp.extract(args)
 
-    training(model_params, optim_params, pipeline_params, comp_params,
-             [1_000, 3_000, 7_000, 15_000, 30_000],
-             [1_000, 3_000, 7_000, 15_000, 30_000])
+    training(model_params, optim_params, comp_params)
 

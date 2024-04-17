@@ -57,7 +57,6 @@ def getNerfppNorm(cam_info):
         return center.flatten(), diagonal
 
     cam_centers = []
-
     for cam in cam_info:
         W2C = getWorld2View2(None, None, cam.extrinsic)  # cam.R, cam.T)
         C2W = np.linalg.inv(W2C)
@@ -65,7 +64,6 @@ def getNerfppNorm(cam_info):
 
     center, diagonal = get_center_and_diag(cam_centers)
     radius = diagonal * 1.1
-
     translate = -center
 
     return {"translate": translate, "radius": radius}
@@ -104,8 +102,6 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         # image = Image.open(image_path)
         intrinsics = np.asarray([[FovX, 0, width / 2], [0, FovY, height / 2], [0, 0, 1]])
         cam_info = CameraInfo(uid=uid, extrinsic=cam_extrinsics, intrinsic=intrinsics,
-                              # R=R, T=T, FovY=FovY, FovX=FovX,
-                              # image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
@@ -165,6 +161,10 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
     cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics,
                                            images_folder=os.path.join(path, reading_dir))
     cam_infos = sorted(cam_infos_unsorted.copy(), key=lambda x: x.image_name)
+
+    # poses = np.load(path + "/poses_bounds.npy")
+    # print(cam_infos[0], poses[0])
+    # exit(0)
 
     if eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
@@ -259,9 +259,64 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
             cam_infos.append(CameraInfo(uid=idx, extrinsic=w2c, intrinsic=intrinsics,
                                         image_path=image_path, image_name=image_name,
+                                        width=w, height=h))
+    return cam_infos
+
+
+def readCamerasFromTransformsDust3r(path, transformsfile, white_background, extension=".png"):
+    def read_img(img_path):
+        image = Image.open(img_path)
+        im_data = np.array(image.convert("RGBA"))
+        bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
+        norm_data = im_data / 255.0
+        arr = norm_data[:, :, :3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+        image = Image.fromarray(np.array(arr * 255.0, dtype=np.byte), "RGB")
+        return image
+
+    cam_infos = []
+
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+
+        frames = contents["frames"]
+        for idx, frame in enumerate(frames):
+            # TBD: replace with relative path!
+            cam_name = frame["file_path"]
+
+            # NeRF 'transform_matrix' is a camera-to-world transform
+            extrinsics = np.array(frame["transform_matrix"])
+            extrinsics = np.linalg.inv(extrinsics)
+            intrinsics = np.array(frame['intrinsic_matrix'])
+
+            image_path = os.path.join(path, cam_name)
+            image_name = Path(cam_name).stem
+            image = read_img(image_path)
+            w, h = image.size[0], image.size[1]
+
+            intrinsics[0][0] = focal2fov(intrinsics[0][0], w)
+            intrinsics[1][1] = focal2fov(intrinsics[1][1], h)
+
+            cam_infos.append(CameraInfo(uid=idx, extrinsic=extrinsics, intrinsic=intrinsics,
+                                        image_path=image_path, image_name=image_name,
                                         width=w, height=h))#image.size[0], height=image.size[1]))
     return cam_infos
 
+def readDustrInfo(path, white_background, eval):
+    train_cam_infos = readCamerasFromTransformsDust3r(path, "transforms_dust3r.json", white_background)
+    nerf_normalization = {"translate": [0.0, 0.0, 0.0], "radius": 1.0} #getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "scene.ply")
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        print(f"Failed to fetch {ply_path}")
+        pcd = None
+
+    return SceneInfo(point_cloud=pcd,
+                     train_cameras=train_cam_infos,
+                     test_cameras=[],
+                     nerf_normalization=nerf_normalization,
+                     ply_path=ply_path)
 
 def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
     print("Reading Training Transforms")
@@ -303,5 +358,6 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender": readNerfSyntheticInfo
+    "Blender": readNerfSyntheticInfo,
+    "Dust3r": readDustrInfo
 }

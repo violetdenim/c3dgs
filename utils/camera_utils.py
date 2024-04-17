@@ -35,6 +35,7 @@ def loadCam(args, id, cam_info, resolution_scale, save_memory=False):
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
+        # cam_info.intrinsic[:2, :] /= scale
 
     return Camera(colmap_id=cam_info.uid, extrinsic=cam_info.extrinsic, intrinsic=cam_info.intrinsic,
                   h=resolution[1], w=resolution[0],
@@ -64,7 +65,5 @@ def camera_to_JSON(id, camera : Camera):
         'position': pos.tolist(),
         'rotation': serializable_array_2d,
         'intrinsic': serializable_intrinsics
-        # 'fy': fov2focal(camera.FovY, camera.height),
-        # 'fx': fov2focal(camera.FovX, camera.width)
     }
     return camera_entry

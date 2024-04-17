@@ -15,9 +15,9 @@ import numpy as np
 from typing import NamedTuple
 
 class BasicPointCloud(NamedTuple):
-    points : np.array
-    colors : np.array
-    normals : np.array
+    points: np.array
+    colors: np.array
+    normals: np.array
 
 def geom_transform_points(points, transf_matrix):
     P, _ = points.shape
@@ -61,4 +61,4 @@ def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
 
 def focal2fov(focal, pixels):
-    return 2*math.atan(pixels/(2*focal))
+    return 2 * math.atan(pixels / (2 * focal))

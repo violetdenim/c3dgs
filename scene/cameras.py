@@ -17,8 +17,8 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 class Camera(nn.Module):
     def __init__(self, colmap_id, extrinsic, intrinsic, h, w, #R, T, FoVx, FoVy
                  image_name, image_path, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", save_memory=False
-                 ):
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0,
+                 data_device="cuda", save_memory=False):
         super(Camera, self).__init__()
 
         self.uid = uid
@@ -37,16 +37,15 @@ class Camera(nn.Module):
         self.image_width = w
         self.image_height = h
 
-        self.zfar = 100.0
-        self.znear = 0.01
-
         self.trans = trans
         self.scale = scale
 
         self.world_view_transform = torch.tensor(getWorld2View2(None, None, self.extrinsic, trans, scale)).transpose(0, 1).cuda()
-        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.intrinsic[0, 0], fovY=self.intrinsic[1, 1]).transpose(0,1).cuda()
-
+        self.projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, \
+                                                     fovX=self.intrinsic[0, 0], fovY=self.intrinsic[1, 1], \
+                                                     z_sign=1.0).transpose(0, 1).cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
+
         self.camera_center = self.world_view_transform.inverse()[3, :3]
 
         self.save_memory = save_memory
@@ -61,9 +60,13 @@ class Camera(nn.Module):
                 for i in range(3):
                     image[:, :, i] *= alpha
             image = image[:, :, :3]
+            # ATTENTION: flip up and down (for DUST3R ONLY!)
+            image = image[::-1, ::-1, :]
+
             image = cv2.resize(image[:, :, ::-1], (self.image_width, self.image_height))
             image = torch.from_numpy(image).to(self.data_device).permute(2, 0, 1)
             image = image.clamp(0.0, 1.0)
+
             if self.save_memory:
                 return image
             self._image = image

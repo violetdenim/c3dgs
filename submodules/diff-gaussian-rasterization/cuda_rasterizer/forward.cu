@@ -62,14 +62,15 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 	}
 	result += 0.5f;
 
-	if(clamp_color){
-	// RGB colors are clamped to positive values. If values are
-	// clamped, we need to keep track of this for the backward pass.
-	clamped[3 * idx + 0] = (result.x < 0);
-	clamped[3 * idx + 1] = (result.y < 0);
-	clamped[3 * idx + 2] = (result.z < 0);
-	return glm::max(result, 0.0f);
-	}else{
+	if(clamp_color) {
+        // RGB colors are clamped to positive values. If values are
+        // clamped, we need to keep track of this for the backward pass.
+        clamped[3 * idx + 0] = (result.x < 0);
+        clamped[3 * idx + 1] = (result.y < 0);
+        clamped[3 * idx + 2] = (result.z < 0);
+        return glm::max(result, 0.0f);
+	}
+	else {
 		clamped[3 * idx + 0] = false;
 		clamped[3 * idx + 1] = false;
 		clamped[3 * idx + 2] = false;
@@ -202,7 +203,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		return;
 
 	// Transform point by projecting
-	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
+	float3 p_orig = { orig_points[3 * idx + 0], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
 	float p_w = 1.0f / (p_hom.w + 0.0000001f);
 	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
