@@ -390,6 +390,7 @@ class GaussianModel:
             raise NotImplementedError(f"file ending '{ext}' not supported")
 
     def load_ply(self, path):
+
         plydata = PlyData.read(path)
         vertices = plydata['vertex']
         keys = [p.name for p in vertices.properties]
@@ -814,8 +815,8 @@ class GaussianModel:
             colors_precomp = override_color
 
         # precalculate visible points
-        # visible = rasterizer.markVisible(self.get_xyz)
-        visible = torch.ones(self.get_xyz.shape[0], dtype=torch.bool, device=self.get_xyz.device)
+        visible = rasterizer.markVisible(self.get_xyz)
+        # visible = torch.ones(self.get_xyz.shape[0], dtype=torch.bool, device=self.get_xyz.device)
 
         if render_indexed:
             rendered_image, radii = rasterizer(

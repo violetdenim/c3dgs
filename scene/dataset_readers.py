@@ -302,21 +302,11 @@ def readCamerasFromTransformsDust3r(path, transformsfile, white_background, exte
     return cam_infos
 
 def readDustrInfo(path, white_background, eval):
-    train_cam_infos = readCamerasFromTransformsDust3r(path, "transforms_dust3r.json", white_background)
-    nerf_normalization = {"translate": [0.0, 0.0, 0.0], "radius": 1.0} #getNerfppNorm(train_cam_infos)
-
-    ply_path = os.path.join(path, "scene.ply")
-    try:
-        pcd = fetchPly(ply_path)
-    except:
-        print(f"Failed to fetch {ply_path}")
-        pcd = None
-
-    return SceneInfo(point_cloud=pcd,
-                     train_cameras=train_cam_infos,
+    return SceneInfo(point_cloud=None,
+                     train_cameras=readCamerasFromTransformsDust3r(path, "transforms_dust3r.json", white_background),
                      test_cameras=[],
-                     nerf_normalization=nerf_normalization,
-                     ply_path=ply_path)
+                     nerf_normalization={"translate": [0.0, 0.0, 0.0], "radius": 1.0},
+                     ply_path=os.path.join(path, "scene.ply"))
 
 def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
     print("Reading Training Transforms")

@@ -43,10 +43,13 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     #DEBUG ONLY!
     data_step = 1 #10
 
+    # implementing morton sorting
+    gaussians.to_indexed()
+    gaussians._sort_morton()
+
     metric_keys = ["loss", "ssim", "PSNR", "N"]
     full_stats = {k: [] for k in metric_keys}
     image_axis = None
-
     for epoch in (progress_bar := tqdm(range(epoch_count), desc="Training progress")):
         epoch_stats = {"loss": 0.0, "ssim": 0.0, "PSNR": 0.0, "N": 0}
 
