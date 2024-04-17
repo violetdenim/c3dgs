@@ -13,6 +13,9 @@ import torch
 import numpy as np
 from torch import nn
 import os
+from functools import cache
+from sklearn.neighbors import NearestNeighbors
+import numpy as np
 
 from plyfile import PlyData, PlyElement
 from utils.general_utils import strip_symmetric, build_scaling_rotation, build_rotation
@@ -67,10 +70,8 @@ class GaussianModel:
             self.scaling_inverse_activation = torch.log
 
         self.covariance_activation = build_covariance_from_scaling_rotation
-
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
-
         self.rotation_activation = torch.nn.functional.normalize
 
     def __init__(self, sh_degree: int, quantization=True, use_factor_scaling=True, device="cuda"):
@@ -512,11 +513,8 @@ class GaussianModel:
                 mkdir_p(os.path.dirname(os.path.abspath(path)))
 
             dtype = torch.half if half_precision else torch.float32
-
             save_dict = dict()
-
             save_dict["quantization"] = self.quantization
-
             # save position
             if self.quantization:
                 save_dict["xyz"] = self.get_xyz.detach().half().cpu().numpy()
@@ -737,7 +735,23 @@ class GaussianModel:
             self.color_index_mode = ColorMode.ALL_INDEXED
 
         self.active_sh_degree = self.max_sh_degree
-
+    @cache
+    def markVisible(self, P, T=1):
+        #P = viewpoint_camera.full_proj_transform
+        #W = viewpoint_camera.world_view_transform
+        n = self.get_xyz.shape[0]
+        data = torch.cat([self.get_xyz, torch.ones((n, 1))], axis=1) # n x 4
+        u = data @ P[:, 0]
+        v = data @ P[:, 1]
+        z = data @ P[:, 3] + 1e-7
+        u /= z
+        v /= z
+        # z = data @ W[:, 2] # n x 4
+        visible = (u >= -T) & (u <= T) & (v >= -T) & (v <= T) #(z >= 0.2) &
+        idx = torch.nonzero(visible)
+        print(idx.min(), idx.max(), len(idx), len(visible))
+        return visible
+        # return torch.ones(n, dtype=torch.bool, device=self.device)
 
     def render(self,
             viewpoint_camera,
@@ -820,7 +834,13 @@ class GaussianModel:
             colors_precomp = override_color
 
         # precalculate visible points
-        visible = rasterizer.markVisible(self.get_xyz.cuda()).to(self.device)
+        if self.device == torch.device("cuda"):
+            visible = rasterizer.markVisible(self.get_xyz)
+        else:
+            # visible = rasterizer.markVisible(self.get_xyz.cuda()).to(self.device)
+            visible = self.markVisible(viewpoint_camera.full_proj_transform)
+
+
         # visible = torch.ones(self.get_xyz.shape[0], dtype=torch.bool, device=self.get_xyz.device)
 
         if render_indexed:
@@ -969,12 +989,16 @@ class GaussianModel:
 
     def _sort_morton(self):
         with torch.no_grad():
+            pp_min = self._xyz.min(0).values
+            pp_diap = self._xyz.max(0).values - pp_min
             xyz_q = (
                 (2**21 - 1)
-                * (self._xyz - self._xyz.min(0).values)
-                / (self._xyz.max(0).values - self._xyz.min(0).values)
+                * (self._xyz - pp_min)
+                / pp_diap
             ).long()
-            order = mortonEncode(xyz_q).sort().indices
+
+            order = mortonEncode(xyz_q, pp_diap.argsort()).sort().indices
+
             self._xyz = nn.Parameter(self._xyz[order], requires_grad=True)
             self._opacity = nn.Parameter(self._opacity[order], requires_grad=True)
             if self._scaling_factor is not None:
@@ -1256,13 +1280,15 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device=self.device, dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def densify_and_clone(self, grads=None, grad_threshold=None, scene_extent=None, selected_pts_mask=None, new_xyz=None):
         # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent)
-        # print("densify_and_clone: ", selected_pts_mask.sum())
-        new_xyz = self._xyz[selected_pts_mask]
+        if selected_pts_mask is None:
+            selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+            selected_pts_mask = torch.logical_and(selected_pts_mask,
+                                                  torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent)
+            # print("densify_and_clone: ", selected_pts_mask.sum())
+        if new_xyz is None:
+            new_xyz = self._xyz[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         if self._scaling_factor is not None:
             new_scaling_factor = self._scaling_factor[selected_pts_mask]
@@ -1327,6 +1353,47 @@ class GaussianModel:
         self.prune_points(prune_mask)
         torch.cuda.empty_cache()
 
+
+    def densify_initial(self):
+        # 1. add new points with specified precision
+        # 2. add points along borders with specified precision (simple interpolation)
+        n = len(self._xyz)
+        pp_min = self._xyz.min(dim=0)[0]
+        pp_max = self._xyz.max(dim=0)[0]
+        volume = torch.prod(pp_max - pp_min).item() / n
+        average_step = volume**(1.0 / 3)
+
+
+        # find 3 nearest neighbours for each point
+        k = 3
+        # along all axis with length greater than average step, perform n-section
+        # find k - nearest neighbours for each xyz and generate n points along the ray
+        data = self._xyz.detach().cpu().numpy()
+
+        nbrs = NearestNeighbors(n_neighbors=k+1, algorithm='ball_tree').fit(data)
+        _, indices = nbrs.kneighbors(data)
+        idx = torch.arange(n, dtype=torch.long, device=self.device)
+        for nb in range(1, k+1):
+            delta_pt = data[indices[:, nb]] - data
+            # faraway = delta_pt.sqr().sum().sqrt() >= 2 * average_step
+            relative_distance = np.sqrt((delta_pt**2.0).sum(axis=1)) / average_step # n x 1
+            max_relative_distance = relative_distance.max()
+            for dist in range(2, int(max_relative_distance)):
+                slot = (relative_distance >= dist) & (relative_distance < dist + 1) # m x 1
+                if slot.sum() > 1:
+                    alpha = torch.Tensor(relative_distance[slot] - dist).to(device=self.device) # m x 1
+                    selected = torch.Tensor(indices[slot, nb]).to(dtype=torch.long, device=self.device) # m x 1
+                    slot = idx[slot] # n x 1
+
+                    coords = []
+                    for i in range(3):
+                        coords.append(self._xyz[slot, i] * (1.0 - alpha) + alpha * self._xyz[selected, i])
+                    coords = torch.stack(coords, dim=1)
+                    self.densify_and_clone(selected_pts_mask=slot, new_xyz=coords)
+        print('Densification completed')
+        return
+
+
     def reset_opacity(self):
         # print("Resetting opacity")
         # print(self.get_opacity.min(), self.get_opacity.max(), '->')
@@ -1363,8 +1430,9 @@ def splitBy3(a):
     return x
 
 
-def mortonEncode(pos: torch.Tensor) -> torch.Tensor:
-    x, y, z = pos.unbind(-1)
+def mortonEncode(pos: torch.Tensor, ordering=[0, 1, 2]) -> torch.Tensor:
+    arr = pos.unbind(-1)
+    x, y, z = arr[ordering[0]], arr[ordering[1]], arr[ordering[2]]
     answer = torch.zeros(len(pos), dtype=torch.long, device=pos.device)
     answer |= splitBy3(x) | splitBy3(y) << 1 | splitBy3(z) << 2
     return answer

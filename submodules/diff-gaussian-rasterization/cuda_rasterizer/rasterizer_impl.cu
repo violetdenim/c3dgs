@@ -145,11 +145,7 @@ void CudaRasterizer::Rasterizer::markVisible(
 	float* projmatrix,
 	bool* present)
 {
-	checkFrustum << <(P + 255) / 256, 256 >> > (
-		P,
-		means3D,
-		viewmatrix, projmatrix,
-		present);
+	checkFrustum << <(P + 255) / 256, 256 >> > (P, means3D, viewmatrix, projmatrix,	present);
 }
 
 CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& chunk, size_t P)

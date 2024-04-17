@@ -14,7 +14,7 @@ from compression.vq import CompressionSettings, compress_gaussians
 from matplotlib import pyplot as plt
 
 def training(dataset: ModelParams, opt: OptimizationParams, comp_params: CompressionParams):
-    device = "cpu"
+    device = "cuda" # "cpu"
     prepare_output_and_logger(dataset)
 
     dataset.data_device = device
@@ -49,8 +49,9 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     data_step = 1 #10
 
     # implementing morton sorting
-    gaussians.to_indexed()
-    gaussians._sort_morton()
+    gaussians.densify_initial()
+    # gaussians.to_indexed()
+    # gaussians._sort_morton()
 
     metric_keys = ["loss", "ssim", "PSNR", "N"]
     full_stats = {k: [] for k in metric_keys}
