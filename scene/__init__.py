@@ -81,7 +81,6 @@ class Scene:
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, save_memory=save_memory,args=args)
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, save_memory=save_memory, args=args)
-
         if self.loaded_iter and os.path.exists(sub_path):
             self.gaussians.load(
                 glob(

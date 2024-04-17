@@ -392,7 +392,7 @@ class GaussianModel:
             raise NotImplementedError(f"file ending '{ext}' not supported")
 
     def load_ply(self, path):
-
+        print("Loading ply...")
         plydata = PlyData.read(path)
         vertices = plydata['vertex']
         keys = [p.name for p in vertices.properties]
@@ -451,7 +451,9 @@ class GaussianModel:
                 scales[:, idx] = np.asarray(vertices[attr_name])
             scaling = torch.tensor(scales, dtype=torch.float, device=self.device)
         else:
-            dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(xyz).float().to(self.device)), 0.0000001)
+            print("clamping using cuda!")
+            dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(xyz).float().cuda()).to(self.device), 0.0000001)
+            print("done")
             scaling = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)#.detach().cpu().numpy()
 
         rot_names = [p for p in keys if p.startswith("rot")]
@@ -753,7 +755,8 @@ class GaussianModel:
         """
 
         # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-        screenspace_points = torch.zeros_like(self.get_xyz, dtype=self.get_xyz.dtype, requires_grad=True, device=self.device)
+        screenspace_points = torch.zeros_like(self.get_xyz, dtype=self.get_xyz.dtype, \
+                                              requires_grad=True, device=self.device)
         try:
             screenspace_points.retain_grad()
         except:
@@ -768,12 +771,12 @@ class GaussianModel:
             image_width=int(viewpoint_camera.image_width),
             tanfovx=tanfovx,
             tanfovy=tanfovy,
-            bg=bg_color,
+            bg=bg_color.cuda(),
             scale_modifier=scaling_modifier,
-            viewmatrix=viewpoint_camera.world_view_transform,
-            projmatrix=viewpoint_camera.full_proj_transform,
+            viewmatrix=viewpoint_camera.world_view_transform.cuda(),
+            projmatrix=viewpoint_camera.full_proj_transform.cuda(),
             sh_degree=self.active_sh_degree,
-            campos=viewpoint_camera.camera_center,
+            campos=viewpoint_camera.camera_center.cuda(),
             prefiltered=False,
             debug=pipe.debug,
             clamp_color=clamp_color,
@@ -817,42 +820,42 @@ class GaussianModel:
             colors_precomp = override_color
 
         # precalculate visible points
-        visible = rasterizer.markVisible(self.get_xyz)
+        visible = rasterizer.markVisible(self.get_xyz.cuda()).to(self.device)
         # visible = torch.ones(self.get_xyz.shape[0], dtype=torch.bool, device=self.get_xyz.device)
 
         if render_indexed:
             rendered_image, radii = rasterizer(
-                means3D=means3D[visible, :],
-                means2D=means2D[visible, :],
-                shs=shs,
-                sh_indices=self._feature_indices[visible],
-                g_indices=self._gaussian_indices[visible],
+                means3D=means3D[visible, :].cuda(),
+                means2D=means2D[visible, :].cuda(),
+                shs=shs.cuda() if shs is not None else None,
+                sh_indices=self._feature_indices[visible].cuda(),
+                g_indices=self._gaussian_indices[visible].cuda(),
                 colors_precomp=None,
-                opacities=opacity[visible],
-                scales=scales,
-                scale_factors=scale_factors[visible, :],
-                rotations=rotations,
-                cov3D_precomp=cov3D_precomp[visible, :] if cov3D_precomp is not None else None,
+                opacities=opacity[visible].cuda(),
+                scales=scales.cuda() if scales is not None else None,
+                scale_factors=scale_factors[visible, :].cuda(),
+                rotations=rotations.cuda() if rotations is not None else None,
+                cov3D_precomp=cov3D_precomp[visible, :].cuda() if cov3D_precomp is not None else None,
             )
         else:
             rendered_image, radii = rasterizer(
-                means3D=means3D[visible, :],
-                means2D=means2D[visible, :],
-                shs=shs[visible, :, :],
-                colors_precomp=colors_precomp[visible, :] if colors_precomp is not None else None,
-                opacities=opacity[visible, :],
-                scales=scales[visible, :] if scales is not None else None,
-                rotations=rotations[visible, :] if rotations is not None else None,
-                cov3D_precomp=cov3D_precomp[visible, :] if cov3D_precomp is not None else None,
+                means3D=means3D[visible, :].cuda(),
+                means2D=means2D[visible, :].cuda(),
+                shs=shs[visible, :, :].cuda(),
+                colors_precomp=colors_precomp[visible, :].cuda() if colors_precomp is not None else None,
+                opacities=opacity[visible, :].cuda(),
+                scales=scales[visible, :].cuda() if scales is not None else None,
+                rotations=rotations[visible, :].cuda() if rotations is not None else None,
+                cov3D_precomp=cov3D_precomp[visible, :].cuda() if cov3D_precomp is not None else None,
             )
         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
         # They will be excluded from value updates used in the splitting criteria.
         return {
-            "render": rendered_image,
-            "viewspace_points": screenspace_points,
-            "visibility_filter": radii > 0,
-            "radii": radii,
-            "visible": visible
+            "render": rendered_image.to(self.device),
+            "viewspace_points": screenspace_points.to(self.device),
+            "visibility_filter": radii.to(self.device) > 0,
+            "radii": radii.to(self.device),
+            "visible": visible.to(self.device)
         }
 
     # convert indexed to non-indexed

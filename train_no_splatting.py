@@ -14,10 +14,14 @@ from compression.vq import CompressionSettings, compress_gaussians
 from matplotlib import pyplot as plt
 
 def training(dataset: ModelParams, opt: OptimizationParams, comp_params: CompressionParams):
-    device = "cuda"
+    device = "cpu"
     prepare_output_and_logger(dataset)
+
+    dataset.data_device = device
+
     gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True, device=device)
     scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=True, save_memory=False)
+
     # it's important to run this after scene initialization, not before!
     gaussians.training_setup(opt)
     gaussians.update_learning_rate(0)
@@ -31,7 +35,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     print(f"Data count: {data_count}")
     epoch_count = 50 # opt.iterations // data_count
     # epochs_splatting = [epoch_count-6]
-    epoch_compression = epoch_count-5
+    epoch_compression = epoch_count - 5
     # calc_epoch = lambda i: max(1, i * epoch_count // opt.iterations)
 
     # recalculate all settings in terms of epoch instead of iterations

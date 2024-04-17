@@ -36,7 +36,6 @@ def loadCam(args, id, cam_info, resolution_scale, save_memory=False):
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
         # cam_info.intrinsic[:2, :] /= scale
-
     return Camera(colmap_id=cam_info.uid, extrinsic=cam_info.extrinsic, intrinsic=cam_info.intrinsic,
                   h=resolution[1], w=resolution[0],
                   image_name=cam_info.image_name, image_path=cam_info.image_path, uid=id, data_device=args.data_device,
