@@ -737,19 +737,16 @@ class GaussianModel:
         self.active_sh_degree = self.max_sh_degree
     @cache
     def markVisible(self, P, T=1):
-        #P = viewpoint_camera.full_proj_transform
-        #W = viewpoint_camera.world_view_transform
         n = self.get_xyz.shape[0]
-        data = torch.cat([self.get_xyz, torch.ones((n, 1))], axis=1) # n x 4
+        data = torch.cat([self.get_xyz, torch.ones((n, 1)).to(self.device)], axis=1) # n x 4
         u = data @ P[:, 0]
         v = data @ P[:, 1]
         z = data @ P[:, 3] + 1e-7
         u /= z
         v /= z
         # z = data @ W[:, 2] # n x 4
-        visible = (u >= -T) & (u <= T) & (v >= -T) & (v <= T) #(z >= 0.2) &
-        idx = torch.nonzero(visible)
-        print(idx.min(), idx.max(), len(idx), len(visible))
+        visible = (u >= -T) & (u <= T) & (v >= -T) & (v <= T) #
+        # idx = torch.nonzero(visible)
         return visible
         # return torch.ones(n, dtype=torch.bool, device=self.device)
 
@@ -791,7 +788,7 @@ class GaussianModel:
             projmatrix=viewpoint_camera.full_proj_transform.cuda(),
             sh_degree=self.active_sh_degree,
             campos=viewpoint_camera.camera_center.cuda(),
-            prefiltered=False,
+            prefiltered=True, #False,
             debug=pipe.debug,
             clamp_color=clamp_color,
         )
@@ -834,11 +831,13 @@ class GaussianModel:
             colors_precomp = override_color
 
         # precalculate visible points
-        if self.device == torch.device("cuda"):
-            visible = rasterizer.markVisible(self.get_xyz)
-        else:
-            # visible = rasterizer.markVisible(self.get_xyz.cuda()).to(self.device)
-            visible = self.markVisible(viewpoint_camera.full_proj_transform)
+        visible = self.markVisible(viewpoint_camera.full_proj_transform)
+
+        # if self.device == torch.device("cuda"):
+        #     visible = rasterizer.markVisible(self.get_xyz)
+        # else:
+        #     # visible = rasterizer.markVisible(self.get_xyz.cuda()).to(self.device)
+        #     visible = self.markVisible(viewpoint_camera.full_proj_transform)
 
 
         # visible = torch.ones(self.get_xyz.shape[0], dtype=torch.bool, device=self.get_xyz.device)
@@ -1353,8 +1352,28 @@ class GaussianModel:
         self.prune_points(prune_mask)
         torch.cuda.empty_cache()
 
+    def extend_to_cameras(self, cameras):
+        # 1. build 3d point plane approximation
+        # 2. use cameras to calculate corner rays
+        # 3. build hull square on grid around reprojections
+        # 4. divide grid into equal squares
+        # 5. reproject points on plane, calc statistics for each square (tile)
+        # 6. subdivide each empty square into sub-grid
 
-    def densify_initial(self):
+
+
+        # for each point determine anchor point to copy features
+        # simplest variant - choose any dot - f.e. with 0 index
+        # or propagate statistics from filled squares to empty
+        # self.densify_and_clone(selected_pts_mask=np.zeros(len(coords), dtype=torch.long, device=self.device),
+        #                        new_xyz=coords)
+        return
+
+    def densify_initial(self, cameras=None):
+        # plane outer fill
+        if cameras is not None:
+            self.extend_to_cameras(cameras)
+
         # 1. add new points with specified precision
         # 2. add points along borders with specified precision (simple interpolation)
         n = len(self._xyz)
@@ -1362,7 +1381,6 @@ class GaussianModel:
         pp_max = self._xyz.max(dim=0)[0]
         volume = torch.prod(pp_max - pp_min).item() / n
         average_step = volume**(1.0 / 3)
-
 
         # find 3 nearest neighbours for each point
         k = 3
@@ -1378,10 +1396,12 @@ class GaussianModel:
             # faraway = delta_pt.sqr().sum().sqrt() >= 2 * average_step
             relative_distance = np.sqrt((delta_pt**2.0).sum(axis=1)) / average_step # n x 1
             max_relative_distance = relative_distance.max()
-            for dist in range(2, int(max_relative_distance)):
-                slot = (relative_distance >= dist) & (relative_distance < dist + 1) # m x 1
+            for dist in range(1, int(max_relative_distance)):
+                # slot = (relative_distance >= dist) & (relative_distance < dist + 1) # m x 1
+                slot = (relative_distance >= dist+1)
                 if slot.sum() > 1:
-                    alpha = torch.Tensor(relative_distance[slot] - dist).to(device=self.device) # m x 1
+                    # alpha = torch.Tensor(relative_distance[slot] - dist).to(device=self.device) # m x 1
+                    alpha = torch.Tensor(dist / relative_distance[slot]).to(device=self.device)  # m x 1
                     selected = torch.Tensor(indices[slot, nb]).to(dtype=torch.long, device=self.device) # m x 1
                     slot = idx[slot] # n x 1
 
