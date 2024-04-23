@@ -22,7 +22,14 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True, device=device)
     scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=False, save_memory=False)
 
+
+    # implementing morton sorting
+    # gaussians.densify_initial()
+    gaussians.to_indexed()
+    gaussians._sort_morton()
+
     # it's important to run this after scene initialization, not before!
+    # training also should be set up after all sorting indicing etc.
     gaussians.training_setup(opt)
     gaussians.update_learning_rate(0)
     # experiment: train in indexed mode
@@ -48,10 +55,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     #DEBUG ONLY!
     data_step = 1 #10
 
-    # implementing morton sorting
-    # gaussians.densify_initial()
-    # gaussians.to_indexed()
-    # gaussians._sort_morton()
+
 
     metric_keys = ["loss", "ssim", "PSNR", "N"]
     full_stats = {k: [] for k in metric_keys}

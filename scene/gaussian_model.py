@@ -11,6 +11,7 @@
 
 import torch
 import numpy as np
+from matplotlib import pyplot as plt
 from torch import nn
 import os
 from functools import cache
@@ -747,6 +748,16 @@ class GaussianModel:
         # z = data @ W[:, 2] # n x 4
         visible = (u >= -T) & (u <= T) & (v >= -T) & (v <= T) #
         # idx = torch.nonzero(visible)
+        # print(idx.min(), idx.max())
+
+        # construct image from bit array
+        # m = int(np.ceil(np.sqrt(n)))
+        # vis = np.zeros(m*m).astype(bool)
+        # vis[:n] = visible.detach().cpu().numpy()
+        # f = plt.figure()
+        # plt.imshow(vis.reshape(m, m))
+        # plt.plot()
+
         return visible
         # return torch.ones(n, dtype=torch.bool, device=self.device)
 
@@ -990,40 +1001,31 @@ class GaussianModel:
         with torch.no_grad():
             pp_min = self._xyz.min(0).values
             pp_diap = self._xyz.max(0).values - pp_min
-            xyz_q = (
-                (2**21 - 1)
-                * (self._xyz - pp_min)
-                / pp_diap
-            ).long()
+            xyz_q = ((2**21 - 1) * (self._xyz - pp_min) / pp_diap).long()
 
             order = mortonEncode(xyz_q, pp_diap.argsort()).sort().indices
 
             self._xyz = nn.Parameter(self._xyz[order], requires_grad=True)
             self._opacity = nn.Parameter(self._opacity[order], requires_grad=True)
             if self._scaling_factor is not None:
-                self._scaling_factor = nn.Parameter(
-                    self._scaling_factor[order], requires_grad=True
-                )
+                self._scaling_factor = nn.Parameter(self._scaling_factor[order], requires_grad=True)
 
             if self.is_color_indexed:
-                self._feature_indices = nn.Parameter(
-                    self._feature_indices[order], requires_grad=False
-                )
+                self._feature_indices = nn.Parameter(self._feature_indices[order], requires_grad=False)
             else:
-                self._features_rest = nn.Parameter(
-                    self._features_rest[order], requires_grad=True
-                )
-                self._features_dc = nn.Parameter(
-                    self._features_dc[order], requires_grad=True
-                )
+                self._features_rest = nn.Parameter(self._features_rest[order], requires_grad=True)
+                self._features_dc = nn.Parameter(self._features_dc[order], requires_grad=True)
 
             if self.is_gaussian_indexed:
-                self._gaussian_indices = nn.Parameter(
-                    self._gaussian_indices[order], requires_grad=False
-                )
+                self._gaussian_indices = nn.Parameter(self._gaussian_indices[order], requires_grad=False)
             else:
                 self._scaling = nn.Parameter(self._scaling[order], requires_grad=True)
                 self._rotation = nn.Parameter(self._rotation[order], requires_grad=True)
+            if len(self.xyz_gradient_accum) > 0:
+                self.xyz_gradient_accum = self.xyz_gradient_accum[order]
+                self.denom = self.denom[order]
+
+
 
     def mask_splats(self, mask: torch.Tensor):
         with torch.no_grad():
@@ -1351,31 +1353,8 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
         torch.cuda.empty_cache()
-
-    def extend_to_cameras(self, cameras):
-        # 1. build 3d point plane approximation
-        # 2. use cameras to calculate corner rays
-        # 3. build hull square on grid around reprojections
-        # 4. divide grid into equal squares
-        # 5. reproject points on plane, calc statistics for each square (tile)
-        # 6. subdivide each empty square into sub-grid
-
-
-
-        # for each point determine anchor point to copy features
-        # simplest variant - choose any dot - f.e. with 0 index
-        # or propagate statistics from filled squares to empty
-        # self.densify_and_clone(selected_pts_mask=np.zeros(len(coords), dtype=torch.long, device=self.device),
-        #                        new_xyz=coords)
-        return
-
-    def densify_initial(self, cameras=None):
-        # plane outer fill
-        if cameras is not None:
-            self.extend_to_cameras(cameras)
-
-        # 1. add new points with specified precision
-        # 2. add points along borders with specified precision (simple interpolation)
+    def densify_initial(self):
+        # add new points with specified precision
         n = len(self._xyz)
         pp_min = self._xyz.min(dim=0)[0]
         pp_max = self._xyz.max(dim=0)[0]
