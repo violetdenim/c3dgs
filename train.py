@@ -47,7 +47,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, pipeline: PipelinePa
     for epoch in (progress_bar := tqdm(range(epoch_count), desc="Training progress")):
         epoch_stats = {"loss": 0.0, "ssim": 0.0, "PSNR": 0.0, "N": 0}
 
-        calc_compression_stats = (epoch % 5 == 0)
+        calc_compression_stats = False #(epoch % 5 == 0)
         if calc_compression_stats:
             gaussians.to_unindexed()
             dc_gradient_accum       = torch.zeros_like(gaussians._features_dc).requires_grad_(False)

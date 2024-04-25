@@ -75,9 +75,10 @@ class GaussianModel:
         self.inverse_opacity_activation = inverse_sigmoid
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, sh_degree: int, quantization=True, use_factor_scaling=True, device="cuda"):
-        self.device = torch.device(device)
+    def __init__(self, sh_degree: int, quantization=True, use_factor_scaling=True, device="cuda", is_splitted=True):
+        self.is_splitted = is_splitted
 
+        self.device = torch.device(device)
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
@@ -842,14 +843,11 @@ class GaussianModel:
             colors_precomp = override_color
 
         # precalculate visible points
-        visible = self.markVisible(viewpoint_camera.full_proj_transform)
-
-        # if self.device == torch.device("cuda"):
-        #     visible = rasterizer.markVisible(self.get_xyz)
-        # else:
-        #     # visible = rasterizer.markVisible(self.get_xyz.cuda()).to(self.device)
-        #     visible = self.markVisible(viewpoint_camera.full_proj_transform)
-
+        if not self.is_splitted:
+            visible = self.markVisible(viewpoint_camera.full_proj_transform)
+        else:
+            if self.device == torch.device("cuda"):
+                visible = rasterizer.markVisible(self.get_xyz)
 
         # visible = torch.ones(self.get_xyz.shape[0], dtype=torch.bool, device=self.get_xyz.device)
 
@@ -1200,9 +1198,7 @@ class GaussianModel:
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
-        print('Before', self._features_dc.shape, new_features_dc.shape)
         self._features_dc = optimizable_tensors["f_dc"]
-        print('After', self._features_dc.shape)
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
@@ -1353,13 +1349,14 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
         torch.cuda.empty_cache()
-    def densify_initial(self):
+
+    def densify_initial(self, dist_thr_coeff=1.0):
         # add new points with specified precision
         n = len(self._xyz)
         pp_min = self._xyz.min(dim=0)[0]
         pp_max = self._xyz.max(dim=0)[0]
         volume = torch.prod(pp_max - pp_min).item() / n
-        average_step = volume**(1.0 / 3)
+        average_step = dist_thr_coeff * volume**(1.0 / 3)
 
         # find 3 nearest neighbours for each point
         k = 3
@@ -1367,7 +1364,7 @@ class GaussianModel:
         # find k - nearest neighbours for each xyz and generate n points along the ray
         data = self._xyz.detach().cpu().numpy()
 
-        nbrs = NearestNeighbors(n_neighbors=k+1, algorithm='ball_tree').fit(data)
+        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='ball_tree').fit(data)
         _, indices = nbrs.kneighbors(data)
         idx = torch.arange(n, dtype=torch.long, device=self.device)
         for nb in range(1, k+1):
@@ -1391,7 +1388,6 @@ class GaussianModel:
                     self.densify_and_clone(selected_pts_mask=slot, new_xyz=coords)
         print('Densification completed')
         return
-
 
     def reset_opacity(self):
         # print("Resetting opacity")

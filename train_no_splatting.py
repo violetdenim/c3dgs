@@ -12,19 +12,17 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams, CompressionParams
 from compression.vq import CompressionSettings, compress_gaussians
 from matplotlib import pyplot as plt
+import numpy as np
 
 def training(dataset: ModelParams, opt: OptimizationParams, comp_params: CompressionParams):
     device = "cuda" # "cpu"
     prepare_output_and_logger(dataset)
-
     dataset.data_device = device
-
-    gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True, device=device)
+    gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True, device=device, is_splitted=False)
     scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=False, save_memory=False)
-
-
+    gaussians.training_setup(opt)
     # implementing morton sorting
-    # gaussians.densify_initial()
+    gaussians.densify_initial()#0.1)
     gaussians.to_indexed()
     gaussians._sort_morton()
 
@@ -40,20 +38,21 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     ema_loss_for_log = 0.0
     data_count = len(scene)
     print(f"Data count: {data_count}")
-    epoch_count = 50 # opt.iterations // data_count
+    epoch_count = 5000 # opt.iterations // data_count
     # epochs_splatting = [epoch_count-6]
     epoch_compression = epoch_count - 5
     # calc_epoch = lambda i: max(1, i * epoch_count // opt.iterations)
 
     # recalculate all settings in terms of epoch instead of iterations
-    saving_epochs = range(epoch_count)
-    testing_epochs = range(epoch_count)
+    saving_epochs = range(0, epoch_count, 1000)
+    testing_epochs = range(0, epoch_count, 1000)
 
     degree_up = 1
 
     iteration = 0
     #DEBUG ONLY!
     data_step = 1 #10
+    show_img = True
 
 
 
@@ -94,8 +93,8 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
                 render_pkg["render"], render_pkg["viewspace_points"],
                 render_pkg["visibility_filter"], render_pkg["radii"],
                 render_pkg["visible"])
-            if iteration % data_count == 0:
-                show_image = image.detach().cpu().numpy().transpose(1, 2, 0)
+            if iteration % data_count == 0 and epoch % 10 == 0 and show_img:
+                show_image = np.clip(image.detach().cpu().numpy().transpose(1, 2, 0), 0, 1)
                 # show_image = viewpoint_cam.original_image.detach().cpu().numpy().transpose(1, 2, 0)
                 if image_axis is None:
                     plt.ion()
