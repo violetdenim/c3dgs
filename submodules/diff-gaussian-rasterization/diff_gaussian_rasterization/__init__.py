@@ -12,6 +12,7 @@
 from typing import NamedTuple
 import torch.nn as nn
 import torch
+import math
 from . import _C
 
 # TOOD add indexed methods
@@ -94,6 +95,11 @@ class _RasterizeGaussians(torch.autograd.Function):
         raster_settings,
     ):
         # Restructure arguments the way that the C++ lib expects them
+        tanfovx = float(math.tan(raster_settings.intrinsic[0, 0] * 0.5))
+        tanfovy = float(math.tan(raster_settings.intrinsic[1, 1] * 0.5))
+        image_height = int(raster_settings.intrinsic[1, 2])
+        image_width = int(raster_settings.intrinsic[0, 2])
+
         args = (
             raster_settings.bg,
             means3D,
@@ -105,10 +111,12 @@ class _RasterizeGaussians(torch.autograd.Function):
             cov3Ds_precomp,
             raster_settings.viewmatrix,
             raster_settings.projmatrix,
-            raster_settings.tanfovx,
-            raster_settings.tanfovy,
-            raster_settings.image_height,
-            raster_settings.image_width,
+
+            # raster_settings.tanfovx,
+            # raster_settings.tanfovy,
+            # raster_settings.image_height,
+            # raster_settings.image_width,
+            tanfovx, tanfovy, image_height, image_width,
             sh,
             raster_settings.sh_degree,
             raster_settings.campos,
@@ -183,6 +191,11 @@ class _RasterizeGaussians(torch.autograd.Function):
         ) = ctx.saved_tensors
 
         # Restructure args as C++ method expects them
+        tanfovx = float(math.tan(raster_settings.intrinsic[0, 0] * 0.5))
+        tanfovy = float(math.tan(raster_settings.intrinsic[1, 1] * 0.5))
+        image_height = int(raster_settings.intrinsic[1, 2])
+        image_width = int(raster_settings.intrinsic[0, 2])
+
         args = (
             raster_settings.bg,
             means3D,
@@ -194,8 +207,9 @@ class _RasterizeGaussians(torch.autograd.Function):
             cov3Ds_precomp,
             raster_settings.viewmatrix,
             raster_settings.projmatrix,
-            raster_settings.tanfovx,
-            raster_settings.tanfovy,
+            # raster_settings.tanfovx,
+            # raster_settings.tanfovy,
+            tanfovx, tanfovy,
             grad_out_color,
             sh,
             raster_settings.sh_degree,
@@ -274,6 +288,11 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
         raster_settings,
     ):
         # Restructure arguments the way that the C++ lib expects them
+        tanfovx = float(math.tan(raster_settings.intrinsic[0, 0] * 0.5))
+        tanfovy = float(math.tan(raster_settings.intrinsic[1, 1] * 0.5))
+        image_height = int(raster_settings.intrinsic[1, 2])
+        image_width = int(raster_settings.intrinsic[0, 2])
+
         args = (
             raster_settings.bg,
             means3D,
@@ -286,10 +305,11 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             cov3Ds_precomp,
             raster_settings.viewmatrix,
             raster_settings.projmatrix,
-            raster_settings.tanfovx,
-            raster_settings.tanfovy,
-            raster_settings.image_height,
-            raster_settings.image_width,
+            # raster_settings.tanfovx,
+            # raster_settings.tanfovy,
+            # raster_settings.image_height,
+            # raster_settings.image_width,
+            tanfovx, tanfovy, image_height, image_width,
             sh,
             raster_settings.sh_degree,
             raster_settings.campos,
@@ -370,7 +390,8 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             sh_indices,
             g_inidices,
         ) = ctx.saved_tensors
-
+        tanfovx = float(math.tan(raster_settings.intrinsic[0, 0] * 0.5))
+        tanfovy = float(math.tan(raster_settings.intrinsic[1, 1] * 0.5))
         # Restructure args as C++ method expects them
         args = (
             raster_settings.bg,
@@ -384,8 +405,9 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             cov3Ds_precomp,
             raster_settings.viewmatrix,
             raster_settings.projmatrix,
-            raster_settings.tanfovx,
-            raster_settings.tanfovy,
+            # raster_settings.tanfovx,
+            # raster_settings.tanfovy,
+            tanfovx, tanfovy,
             grad_out_color,
             sh,
             raster_settings.sh_degree,
@@ -454,10 +476,13 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
 
 
 class GaussianRasterizationSettings(NamedTuple):
-    image_height: int
-    image_width: int
-    tanfovx: float
-    tanfovy: float
+    intrinsic: torch.Tensor
+    extrinsic: torch.Tensor
+
+    # image_height: int
+    # image_width: int
+    # tanfovx: float
+    # tanfovy: float
     bg: torch.Tensor
     scale_modifier: float
     viewmatrix: torch.Tensor

@@ -786,20 +786,37 @@ class GaussianModel:
             pass
 
         # Set up rasterization configuration
-        tanfovx = math.tan(viewpoint_camera.intrinsic[0, 0] * 0.5)
-        tanfovy = math.tan(viewpoint_camera.intrinsic[1, 1] * 0.5)
+        # tanfovx = math.tan(viewpoint_camera.intrinsic[0, 0] * 0.5)
+        # tanfovy = math.tan(viewpoint_camera.intrinsic[1, 1] * 0.5)
+
+        def getProjectionMatrix(intrinsic):
+            znear, zfar, z_sign = 0.01, 100.0, 1.0
+
+            tanHalfFovY = math.tan((intrinsic[1,1] / 2))
+            tanHalfFovX = math.tan((intrinsic[0,0] / 2))
+
+            return torch.Tensor([
+                [1.0 / tanHalfFovX, 0.0, 0.0, 0.0],
+                [0.0, 1.0 / tanHalfFovY, 0.0, 0.0],
+                [0.0, 0.0, z_sign * zfar / (zfar - znear), -(zfar * znear) / (zfar - znear)],
+                [0.0, 0.0, z_sign, 0.0]
+            ]).transpose(0, 1).cuda()
+
+        full = viewpoint_camera.extrinsic @ getProjectionMatrix(viewpoint_camera.intrinsic)
 
         raster_settings = GaussianRasterizationSettings(
-            image_height=int(viewpoint_camera.image_height),
-            image_width=int(viewpoint_camera.image_width),
-            tanfovx=tanfovx,
-            tanfovy=tanfovy,
+            intrinsic = viewpoint_camera.intrinsic.cuda(),
+            extrinsic = viewpoint_camera.extrinsic.cuda(),
+            # image_height=int(viewpoint_camera.intrinsic[1, 2]),
+            # image_width=int(viewpoint_camera.intrinsic[0, 2]),
+            # tanfovx=tanfovx,
+            # tanfovy=tanfovy,
             bg=bg_color.cuda(),
             scale_modifier=scaling_modifier,
-            viewmatrix=viewpoint_camera.world_view_transform.cuda(),
-            projmatrix=viewpoint_camera.full_proj_transform.cuda(),
+            viewmatrix=viewpoint_camera.extrinsic.cuda(), # viewpoint_camera.world_view_transform.cuda(),
+            projmatrix=full, # viewpoint_camera.full_proj_transform.cuda(),
             sh_degree=self.active_sh_degree,
-            campos=viewpoint_camera.camera_center.cuda(),
+            campos=viewpoint_camera.extrinsic.inverse()[3, :3], #viewpoint_camera.camera_center.cuda(),
             prefiltered=True, #False,
             debug=pipe.debug,
             clamp_color=clamp_color,
@@ -844,7 +861,7 @@ class GaussianModel:
 
         # precalculate visible points
         if not self.is_splitted:
-            visible = self.markVisible(viewpoint_camera.full_proj_transform)
+            visible = self.markVisible(full)#viewpoint_camera.full_proj_transform)
         else:
             if self.device == torch.device("cuda"):
                 visible = rasterizer.markVisible(self.get_xyz)

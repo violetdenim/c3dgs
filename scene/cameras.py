@@ -23,8 +23,10 @@ class Camera(nn.Module):
 
         self.uid = uid
         self.colmap_id = colmap_id
-        self.extrinsic = extrinsic
-        self.intrinsic = intrinsic
+        self.extrinsic = torch.FloatTensor(extrinsic).transpose(0, 1).cuda()
+        self.intrinsic = torch.FloatTensor(intrinsic).cuda()
+        self.intrinsic[0, 2] = w
+        self.intrinsic[1, 2] = h
         self.image_name = image_name
         self.image_path = image_path
 
@@ -34,19 +36,18 @@ class Camera(nn.Module):
             print(e)
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
-        self.image_width = w
-        self.image_height = h
+        # self.image_width = w
+        # self.image_height = h
 
-        self.trans = trans
-        self.scale = scale
+        # self.trans = trans
+        # self.scale = scale
 
-        self.world_view_transform = torch.tensor(getWorld2View2(None, None, self.extrinsic, trans, scale)).transpose(0, 1).to(data_device)
-        self.projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, \
-                                                     fovX=self.intrinsic[0, 0], fovY=self.intrinsic[1, 1], \
-                                                     z_sign=1.0).transpose(0, 1).to(data_device)
-        self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
-
-        self.camera_center = self.world_view_transform.inverse()[3, :3]
+        # self.world_view_transform = torch.tensor(getWorld2View2(None, None, self.extrinsic, trans, scale)).transpose(0, 1).to(data_device)
+        # self.projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, \
+        #                                              fovX=self.intrinsic[0, 0], fovY=self.intrinsic[1, 1], \
+        #                                              z_sign=1.0).transpose(0, 1).to(data_device)
+        # self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
+        # self.camera_center = self.world_view_transform.inverse()[3, :3]
 
         self.save_memory = save_memory
         self._image = None
@@ -63,7 +64,8 @@ class Camera(nn.Module):
             # ATTENTION: flip up and down (for DUST3R ONLY!)
             image = image[::-1, ::-1, :]
 
-            image = cv2.resize(image[:, :, ::-1], (self.image_width, self.image_height))
+            image = cv2.resize(image[:, :, ::-1], (int(self.intrinsic[0, 2]), int(self.intrinsic[1, 2])))
+            #(self.image_width, self.image_height))
             image = torch.from_numpy(image).to(self.data_device).permute(2, 0, 1)
             image = image.clamp(0.0, 1.0)
 
