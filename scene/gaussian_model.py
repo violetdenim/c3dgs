@@ -801,7 +801,7 @@ class GaussianModel:
             viewmatrix=viewpoint_camera.extrinsic.cuda(), # viewpoint_camera.world_view_transform.cuda(),
             # projmatrix=full, # viewpoint_camera.full_proj_transform.cuda(),
             sh_degree=self.active_sh_degree,
-            campos=viewpoint_camera.extrinsic.inverse()[3, :3], #viewpoint_camera.camera_center.cuda(),
+            # campos=viewpoint_camera.extrinsic.inverse()[3, :3], #viewpoint_camera.camera_center.cuda(),
             prefiltered=True, #False,
             debug=pipe.debug,
             clamp_color=clamp_color,

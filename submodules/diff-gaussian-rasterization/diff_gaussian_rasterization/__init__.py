@@ -131,7 +131,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             tanfovx, tanfovy, image_height, image_width,
             sh,
             raster_settings.sh_degree,
-            raster_settings.campos,
+            raster_settings.extrinsic.inverse()[3, :3],  # raster_settings.campos,
             raster_settings.prefiltered,
             raster_settings.debug,
             raster_settings.clamp_color,
@@ -225,7 +225,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_out_color,
             sh,
             raster_settings.sh_degree,
-            raster_settings.campos,
+            raster_settings.extrinsic.inverse()[3, :3],#raster_settings.campos,
             geomBuffer,
             num_rendered,
             binningBuffer,
@@ -324,7 +324,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             tanfovx, tanfovy, image_height, image_width,
             sh,
             raster_settings.sh_degree,
-            raster_settings.campos,
+            raster_settings.extrinsic.inverse()[3, :3],#raster_settings.campos,
             sh_indices,
             g_inidices,
             raster_settings.prefiltered,
@@ -423,7 +423,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             grad_out_color,
             sh,
             raster_settings.sh_degree,
-            raster_settings.campos,
+            raster_settings.extrinsic.inverse()[3, :3],#raster_settings.campos,
             geomBuffer,
             num_rendered,
             binningBuffer,
@@ -500,7 +500,7 @@ class GaussianRasterizationSettings(NamedTuple):
     viewmatrix: torch.Tensor
     # projmatrix: torch.Tensor
     sh_degree: int
-    campos: torch.Tensor
+    # campos: torch.Tensor
     prefiltered: bool
     debug: bool
     clamp_color: bool
