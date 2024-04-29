@@ -17,6 +17,18 @@ from . import _C
 
 # TOOD add indexed methods
 
+def getProjectionMatrix(intrinsic):
+    znear, zfar, z_sign = 0.01, 100.0, 1.0
+
+    tanHalfFovY = math.tan((intrinsic[1, 1] / 2))
+    tanHalfFovX = math.tan((intrinsic[0, 0] / 2))
+
+    return torch.Tensor([
+        [1.0 / tanHalfFovX, 0.0, 0.0, 0.0],
+        [0.0, 1.0 / tanHalfFovY, 0.0, 0.0],
+        [0.0, 0.0, z_sign * zfar / (zfar - znear), -(zfar * znear) / (zfar - znear)],
+        [0.0, 0.0, z_sign, 0.0]
+    ]).transpose(0, 1).cuda()
 
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [
@@ -110,7 +122,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.scale_modifier,
             cov3Ds_precomp,
             raster_settings.viewmatrix,
-            raster_settings.projmatrix,
+            raster_settings.viewmatrix @ getProjectionMatrix(raster_settings.intrinsic), #raster_settings.projmatrix,
 
             # raster_settings.tanfovx,
             # raster_settings.tanfovy,
@@ -206,7 +218,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.scale_modifier,
             cov3Ds_precomp,
             raster_settings.viewmatrix,
-            raster_settings.projmatrix,
+            raster_settings.viewmatrix @ getProjectionMatrix(raster_settings.intrinsic), #raster_settings.projmatrix,
             # raster_settings.tanfovx,
             # raster_settings.tanfovy,
             tanfovx, tanfovy,
@@ -304,7 +316,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             raster_settings.scale_modifier,
             cov3Ds_precomp,
             raster_settings.viewmatrix,
-            raster_settings.projmatrix,
+            raster_settings.viewmatrix @ getProjectionMatrix(raster_settings.intrinsic), #raster_settings.projmatrix,
             # raster_settings.tanfovx,
             # raster_settings.tanfovy,
             # raster_settings.image_height,
@@ -404,7 +416,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             raster_settings.scale_modifier,
             cov3Ds_precomp,
             raster_settings.viewmatrix,
-            raster_settings.projmatrix,
+            raster_settings.viewmatrix @ getProjectionMatrix(raster_settings.intrinsic), #raster_settings.projmatrix,
             # raster_settings.tanfovx,
             # raster_settings.tanfovy,
             tanfovx, tanfovy,
@@ -486,7 +498,7 @@ class GaussianRasterizationSettings(NamedTuple):
     bg: torch.Tensor
     scale_modifier: float
     viewmatrix: torch.Tensor
-    projmatrix: torch.Tensor
+    # projmatrix: torch.Tensor
     sh_degree: int
     campos: torch.Tensor
     prefiltered: bool
@@ -504,7 +516,7 @@ class GaussianRasterizer(nn.Module):
         with torch.no_grad():
             raster_settings = self.raster_settings
             visible = _C.mark_visible(
-                positions, raster_settings.viewmatrix, raster_settings.projmatrix
+                positions, raster_settings.viewmatrix, raster_settings.viewmatrix @ getProjectionMatrix(raster_settings.intrinsic), #raster_settings.projmatrix,
             )
         return visible
 
@@ -571,7 +583,7 @@ class GaussianRasterizerIndexed(nn.Module):
         with torch.no_grad():
             raster_settings = self.raster_settings
             visible = _C.mark_visible(
-                positions, raster_settings.viewmatrix, raster_settings.projmatrix
+                positions, raster_settings.viewmatrix, raster_settings.viewmatrix @ getProjectionMatrix(raster_settings.intrinsic), #raster_settings.projmatrix,
             )
 
         return visible
