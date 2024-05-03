@@ -37,8 +37,8 @@ RasterizeGaussiansCUDA(
 	const bool prefiltered,
 	const bool debug,
 	const bool clamp_color);
-
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+// last parameter corresponds to viewmatrix
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>//, torch::Tensor>
  RasterizeGaussiansBackwardCUDA(
  	const torch::Tensor& background,
 	const torch::Tensor& means3D,
@@ -88,7 +88,8 @@ RasterizeGaussiansIndexedCUDA(
 	const bool debug,
 	const bool clamp_color);
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+// last parameter corresponds to viewmatrix
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>//, torch::Tensor>
  RasterizeGaussiansBackwardIndexedCUDA(
  	const torch::Tensor& background,
 	const torch::Tensor& means3D,

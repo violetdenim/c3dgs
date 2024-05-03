@@ -786,23 +786,13 @@ class GaussianModel:
             pass
 
         # Set up rasterization configuration
-        # tanfovx = math.tan(viewpoint_camera.intrinsic[0, 0] * 0.5)
-        # tanfovy = math.tan(viewpoint_camera.intrinsic[1, 1] * 0.5)
-
-
-
-
-
         raster_settings = GaussianRasterizationSettings(
-            intrinsic = viewpoint_camera.intrinsic.cuda(),
-            extrinsic = viewpoint_camera.extrinsic.cuda(),
+            intrinsic=viewpoint_camera.intrinsic.cuda(),
+            extrinsic=viewpoint_camera.extrinsic.cuda(),
             bg=bg_color.cuda(),
             scale_modifier=scaling_modifier,
-            viewmatrix=viewpoint_camera.extrinsic.cuda(), # viewpoint_camera.world_view_transform.cuda(),
-            # projmatrix=full, # viewpoint_camera.full_proj_transform.cuda(),
             sh_degree=self.active_sh_degree,
-            # campos=viewpoint_camera.extrinsic.inverse()[3, :3], #viewpoint_camera.camera_center.cuda(),
-            prefiltered=True, #False,
+            prefiltered=False,
             debug=pipe.debug,
             clamp_color=clamp_color,
         )
@@ -850,12 +840,12 @@ class GaussianModel:
             visible = self.markVisible(full)#viewpoint_camera.full_proj_transform)
         else:
             if self.device == torch.device("cuda"):
-                visible = rasterizer.markVisible(self.get_xyz)
+                visible = rasterizer.markVisible(self.get_xyz, extrinsic=viewpoint_camera.extrinsic.cuda())
 
         # visible = torch.ones(self.get_xyz.shape[0], dtype=torch.bool, device=self.get_xyz.device)
 
         if render_indexed:
-            rendered_image, radii = rasterizer(
+            rendered_image, radii = rasterizer( #extrinsic
                 means3D=means3D[visible, :].cuda(),
                 means2D=means2D[visible, :].cuda(),
                 shs=shs.cuda() if shs is not None else None,
@@ -867,9 +857,10 @@ class GaussianModel:
                 scale_factors=scale_factors[visible, :].cuda(),
                 rotations=rotations.cuda() if rotations is not None else None,
                 cov3D_precomp=cov3D_precomp[visible, :].cuda() if cov3D_precomp is not None else None,
+                # extrinsic=viewpoint_camera.extrinsic.cuda(),
             )
         else:
-            rendered_image, radii = rasterizer(
+            rendered_image, radii  = rasterizer( #extrinsic
                 means3D=means3D[visible, :].cuda(),
                 means2D=means2D[visible, :].cuda(),
                 shs=shs[visible, :, :].cuda(),
@@ -878,7 +869,9 @@ class GaussianModel:
                 scales=scales[visible, :].cuda() if scales is not None else None,
                 rotations=rotations[visible, :].cuda() if rotations is not None else None,
                 cov3D_precomp=cov3D_precomp[visible, :].cuda() if cov3D_precomp is not None else None,
+                # extrinsic=viewpoint_camera.extrinsic.cuda(),
             )
+
         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
         # They will be excluded from value updates used in the splitting criteria.
         return {
@@ -886,7 +879,8 @@ class GaussianModel:
             "viewspace_points": screenspace_points.to(self.device),
             "visibility_filter": radii.to(self.device) > 0,
             "radii": radii.to(self.device),
-            "visible": visible.to(self.device)
+            "visible": visible.to(self.device),
+            # "extrinsic": extrinsic.to(self.device)
         }
 
     # convert indexed to non-indexed

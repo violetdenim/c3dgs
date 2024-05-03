@@ -364,6 +364,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
+// 	float* dL_dViewMatrix,
 	bool debug)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
@@ -429,6 +430,8 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dsh,
 		(glm::vec3*)dL_dscale,
 		(glm::vec4*)dL_drot), debug)
+
+// 	cudaMemcpy(dL_dViewMatrix, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToDevice);
 }
 
 
@@ -615,6 +618,7 @@ void CudaRasterizer::Rasterizer::backward_indexed(
 	float* dL_dscale,
 	float* dL_dscale_factor,
 	float* dL_drot,
+// 	float* dL_dViewMatrix,
 	bool debug,
 	const int64_t* sh_indices,
 	const int64_t* g_indices)
@@ -686,4 +690,6 @@ void CudaRasterizer::Rasterizer::backward_indexed(
 		(glm::vec4*)dL_drot,
 		sh_indices,
 		g_indices), debug)
+
+// 	cudaMemcpy(dL_dViewMatrix, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToDevice);
 }

@@ -82,6 +82,7 @@ namespace CudaRasterizer
 			float* dL_dsh,
 			float* dL_dscale,
 			float* dL_drot,
+			//float* dL_dViewMatrix,
 			bool debug);
 
 
@@ -144,6 +145,7 @@ namespace CudaRasterizer
 			float* dL_dscale,
 			float* dL_dscale_factor,
 			float* dL_drot,
+			//float* dL_dViewMatrix,
 			bool debug,
 			const int64_t* sh_indices,
 			const int64_t* g_indices);

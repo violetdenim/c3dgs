@@ -55,7 +55,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     show_img = True
 
 
-    metric_keys = ["loss", "ssim", "PSNR", "N"]
+    metric_keys = ["loss"]
     full_stats = {k: [] for k in metric_keys}
     image_axis = None
 
@@ -66,35 +66,13 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
         viewpoint_cam.extrinsic.requires_grad_(True)
 
     for epoch in (progress_bar := tqdm(range(epoch_count), desc="Training progress")):
-        epoch_stats = {"loss": 0.0, "ssim": 0.0, "PSNR": 0.0, "N": 0}
-
-        calc_compression_stats = (epoch == epoch_compression)
-        if calc_compression_stats:
-            # gaussians.to_unindexed()
-            dc_gradient_accum       = torch.zeros_like(gaussians._features_dc).requires_grad_(False)
-            rest_gradient_accum     = torch.zeros_like(gaussians._features_rest).requires_grad_(False)
-            cov3d_gradient_accum    = torch.zeros_like(gaussians.get_covariance()).requires_grad_(False)
-
+        epoch_stats = {key: 0.0 for key in metric_keys}
         num_pixels = 0
 
-        # _psnr_stat = full_stats["PSNR"]
-        # if len(_psnr_stat) >= 3:
-        #     a, b, c = _psnr_stat[0], _psnr_stat[-2], _psnr_stat[-1]
-        #     relative_change = max(0, c - b) / max(1e-05, c - a)
-        #     data_step = min(max(int(relative_change * data_count), 1), data_step)
-        #     print(f"epoch = {epoch}, relative_change={relative_change} -> data_step={data_step}")
-
-
-        for i_camera, viewpoint_cam in enumerate(scene.getTrainCameras()[::data_step]):
+        for i_camera, viewpoint_cam in enumerate(scene.getTrainCameras()[0]):
             gaussians.update_learning_rate(iteration)
-            print(viewpoint_cam.extrinsic.requires_grad)
-            # render_pkg = render(viewpoint_cam, gaussians, pipeline, bg)
-            cov3d_scaled = gaussians.get_covariance().detach()
-            scaling_factor = gaussians.get_scaling_factor.detach()
-            coeff = scaling_factor.square()
-            cov3d = (cov3d_scaled / coeff).requires_grad_(True)
 
-            render_pkg = gaussians.render(viewpoint_cam, pipeline_params, bg, clamp_color=False, cov3d=cov3d * coeff)
+            render_pkg = gaussians.render(viewpoint_cam, pipeline_params, bg)
 
             image, viewspace_point_tensor, visibility_filter, radii, visible = (
                 render_pkg["render"], render_pkg["viewspace_points"],
@@ -113,31 +91,13 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
                     fig.canvas.flush_events()
 
             # Loss
-            gt_image = viewpoint_cam.original_image.to(device)
-            l1_diff = l1_loss(image, gt_image)
-            _ssim = ssim(image, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
-            loss2 = torch.exp(torch.abs(original_extrinsics[i_camera] - viewpoint_cam.extrinsic)).sum()
-            print(loss2.item())
-            loss += loss2 * 100
+            loss = torch.abs(original_extrinsics[i_camera] - viewpoint_cam.extrinsic).sum()
             loss.backward()
-
-            _vis_filter = torch.zeros_like(visible)
-            _vis_filter[visible] = visibility_filter
-            # Keep track of max radii in image-space for pruning
-            gaussians.max_radii2D[_vis_filter] = torch.max(gaussians.max_radii2D[_vis_filter], radii[visibility_filter])
-            gaussians.add_densification_stats(viewspace_point_tensor, _vis_filter)
-
-            if calc_compression_stats:
-                dc_gradient_accum[_vis_filter, ...]     += torch.abs(gaussians._features_dc.grad[_vis_filter, ...])
-                rest_gradient_accum[_vis_filter, ...]   += torch.abs(gaussians._features_rest.grad[_vis_filter, ...])
-                cov3d_gradient_accum[_vis_filter, ...]  += torch.abs(cov3d.grad[_vis_filter, ...])
-
+            print(viewpoint_cam.extrinsic)
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
 
-            iteration_stats = {"loss": loss.item(), "ema_loss": ema_loss_for_log, "ssim": _ssim.item(),
-                                      "PSNR": psnr(image, gt_image).mean().item(), "N": len(gaussians.get_xyz)}
+            iteration_stats = {"loss": loss.item()}
 
             for k in epoch_stats.keys():
                 epoch_stats[k] += iteration_stats[k]
@@ -145,58 +105,12 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
             progress_bar.set_postfix(iteration_stats)
             gaussians.optimizer.step()
             gaussians.optimizer.zero_grad(set_to_none=True)
-            cov3d.grad.zero_()
-            if viewpoint_cam.extrinsic.grad is not None:
-                viewpoint_cam.extrinsic.grad.zero_()
+            # if viewpoint_cam.extrinsic.grad is not None:
+            #     viewpoint_cam.extrinsic.grad.zero_()
 
             iteration += 1
             num_pixels += image.shape[1] * image.shape[2]
 
-        # if data_step == 1 and epoch < epoch_compression:#epoch in epochs_splatting:
-        #     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, 20)
-        #     gaussians.check_state()
-
-        if calc_compression_stats:
-            color_importance = torch.cat([dc_gradient_accum, rest_gradient_accum], 1).flatten(-2) / num_pixels
-            gaussian_sensitivity = cov3d_gradient_accum.detach() / num_pixels
-
-            color_importance_n = color_importance.amax(-1)
-            gaussian_importance_n = gaussian_sensitivity.amax(-1)
-
-            color_compression_settings = CompressionSettings(
-                codebook_size=comp_params.color_codebook_size,
-                importance_prune=comp_params.color_importance_prune,
-                importance_include=None,  # comp_params.color_importance_include,
-                importance_include_relative=0.9,
-                steps=int(comp_params.color_cluster_iterations),
-                decay=comp_params.color_decay,
-                batch_size=comp_params.color_batch_size,
-            )
-
-            gaussian_compression_settings = CompressionSettings(
-                codebook_size=comp_params.gaussian_codebook_size,
-                importance_prune=None,
-                importance_include=None,  # comp_params.gaussian_importance_include,#None
-                importance_include_relative=0.75,
-                steps=int(comp_params.gaussian_cluster_iterations),
-                decay=comp_params.gaussian_decay,
-                batch_size=comp_params.gaussian_batch_size,
-            )
-            # gaussians.check_state()
-            # n_initial = gaussians._xyz.shape[0]
-            print('Compression')
-            compress_gaussians(gaussians, color_importance_n, gaussian_importance_n,
-                               color_compression_settings if not comp_params.not_compress_color else None,
-                               gaussian_compression_settings if not comp_params.not_compress_gaussians else None,
-                               comp_params.color_compress_non_dir,
-                               prune_threshold=-1,#comp_params.prune_threshold,
-                               silent=True)
-            gaussians.check_state()
-        # n_compressed = gaussians._xyz.shape[0]
-        # gaussians.to_unindexed() # always uncompress back - so only unification is actually performed
-        # n_uncompressed = gaussians._xyz.shape[0]
-        # print(n_initial, n_compressed, n_uncompressed, gaussians.xyz_gradient_accum.shape, gaussians.denom.shape)
-        # gaussians.check_state()
 
         if epoch in testing_epochs:
             print(f"\n[EPOCH {epoch}] " + ",".join([f"{k}: {v/(data_count/data_step):.4f}" for k, v in epoch_stats.items()]))
