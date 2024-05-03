@@ -30,18 +30,11 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     # training also should be set up after all sorting indicing etc.
     gaussians.training_setup(opt)
     gaussians.update_learning_rate(0)
-    # experiment: train in indexed mode
-    # gaussians.to_indexed()
 
     bg = torch.rand((3), device=device) if opt.random_background else torch.tensor([0, 0, 0], dtype=torch.float32, device=device)
-    viewpoint_stack = None
-    ema_loss_for_log = 0.0
     data_count = len(scene)
     print(f"Data count: {data_count}")
     epoch_count = 5000 # opt.iterations // data_count
-    # epochs_splatting = [epoch_count-6]
-    epoch_compression = epoch_count - 5
-    # calc_epoch = lambda i: max(1, i * epoch_count // opt.iterations)
 
     # recalculate all settings in terms of epoch instead of iterations
     saving_epochs = range(0, epoch_count, 1000)
@@ -60,7 +53,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     image_axis = None
 
     original_extrinsics = []
-    for i, viewpoint_cam in enumerate(scene.getTrainCameras()):
+    for i, viewpoint_cam in enumerate(scene.getTrainCameras()[0:1]):
         gaussians.optimizer.add_param_group({"params": [viewpoint_cam.extrinsic], "lr": 0.01, "name": f"extr{i}"})
         original_extrinsics.append(viewpoint_cam.extrinsic.clone())
         viewpoint_cam.extrinsic.requires_grad_(True)

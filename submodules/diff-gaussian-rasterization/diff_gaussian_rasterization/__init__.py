@@ -48,7 +48,7 @@ def rasterize_gaussians(
     rotations,
     cov3Ds_precomp,
     raster_settings,
-    # extrinsic
+    extrinsic
 ):
     return _RasterizeGaussians.apply(
         means3D,
@@ -60,7 +60,7 @@ def rasterize_gaussians(
         rotations,
         cov3Ds_precomp,
         raster_settings,
-        # extrinsic
+        extrinsic
     )
 
 
@@ -77,7 +77,7 @@ def rasterize_gaussians_indexed(
     rotations,
     cov3Ds_precomp,
     raster_settings,
-    # extrinsic
+    extrinsic
 ):
     return _RasterizeGaussiansIndexed.apply(
         means3D,
@@ -92,7 +92,7 @@ def rasterize_gaussians_indexed(
         rotations,
         cov3Ds_precomp,
         raster_settings,
-        # extrinsic
+        extrinsic
     )
 
 
@@ -109,14 +109,14 @@ class _RasterizeGaussians(torch.autograd.Function):
         rotations,
         cov3Ds_precomp,
         raster_settings,
-        # extrinsic,
+        extrinsic,
     ):
         # Restructure arguments the way that the C++ lib expects them
         tanfovx = float(math.tan(raster_settings.intrinsic[0, 0] * 0.5))
         tanfovy = float(math.tan(raster_settings.intrinsic[1, 1] * 0.5))
         image_height = int(raster_settings.intrinsic[1, 2])
         image_width = int(raster_settings.intrinsic[0, 2])
-        extrinsic = raster_settings.extrinsic
+        # extrinsic = raster_settings.extrinsic
 
         args = (
             raster_settings.bg,
@@ -172,7 +172,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.save_for_backward(
-            # extrinsic,
+            extrinsic,
             colors_precomp,
             means3D,
             scales,
@@ -192,7 +192,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
         (
-            # extrinsic,
+            extrinsic,
             colors_precomp,
             means3D,
             scales,
@@ -212,7 +212,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         image_width = int(raster_settings.intrinsic[0, 2])
 
         #extrinsic = params[1] # !!!
-        extrinsic = raster_settings.extrinsic
+        # extrinsic = raster_settings.extrinsic
         args = (
             raster_settings.bg,
             means3D,
@@ -253,7 +253,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                     grad_sh,
                     grad_scales,
                     grad_rotations,
-                    # grad_matrix,
+                    grad_matrix,
                 ) = _C.rasterize_gaussians_backward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
@@ -271,7 +271,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 grad_sh,
                 grad_scales,
                 grad_rotations,
-                # grad_matrix,
+                grad_matrix,
             ) = _C.rasterize_gaussians_backward(*args)
 
         grads = (
@@ -284,7 +284,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,
             grad_cov3Ds_precomp,
             None,
-            # grad_matrix,
+            grad_matrix,
         )
 
         return grads
@@ -305,8 +305,8 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
         scale_factors,
         rotations,
         cov3Ds_precomp,
-        raster_settings
-        # extrinsic
+        raster_settings,
+        extrinsic
     ):
         # Restructure arguments the way that the C++ lib expects them
         tanfovx = float(math.tan(raster_settings.intrinsic[0, 0] * 0.5))
@@ -315,7 +315,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
         image_width = int(raster_settings.intrinsic[0, 2])
 
         # extrinsic.requires_grad = True
-        extrinsic = raster_settings.extrinsic
+        # extrinsic = raster_settings.extrinsic
         args = (
             raster_settings.bg,
             means3D,
@@ -373,7 +373,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.save_for_backward(
-            # extrinsic,
+            extrinsic,
             colors_precomp,
             means3D,
             scales,
@@ -396,7 +396,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
         (
-            # extrinsic,
+            extrinsic,
             colors_precomp,
             means3D,
             scales,
@@ -414,7 +414,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
         tanfovx = float(math.tan(raster_settings.intrinsic[0, 0] * 0.5))
         tanfovy = float(math.tan(raster_settings.intrinsic[1, 1] * 0.5))
 
-        extrinsic = raster_settings.extrinsic
+        # extrinsic = raster_settings.extrinsic
         # Restructure args as C++ method expects them
         args = (
             raster_settings.bg,
@@ -460,7 +460,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
                     grad_scales,
                     grad_scale_factors,
                     grad_rotations,
-                    # grad_matrix,
+                    grad_matrix,
                 ) = _C.rasterize_gaussians_backward_indexed(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
@@ -479,7 +479,7 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
                 grad_scales,
                 grad_scale_factors,
                 grad_rotations,
-                # grad_matrix,
+                grad_matrix,
             ) = _C.rasterize_gaussians_backward_indexed(*args)
 
         grads = (
@@ -495,14 +495,14 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             grad_rotations,
             grad_cov3Ds_precomp,
             None,
-            # grad_matrix,
+            grad_matrix,
         )
         return grads
 
 
 class GaussianRasterizationSettings(NamedTuple):
     intrinsic: torch.Tensor
-    extrinsic: torch.Tensor
+    # extrinsic: torch.Tensor
 
     bg: torch.Tensor
     scale_modifier: float
@@ -577,7 +577,7 @@ class GaussianRasterizer(nn.Module):
             rotations,
             cov3D_precomp,
             raster_settings,
-            # extrinsic=extrinsic
+            extrinsic=extrinsic
         )
 
 
@@ -609,7 +609,7 @@ class GaussianRasterizerIndexed(nn.Module):
         scale_factors=None,
         rotations=None,
         cov3D_precomp=None,
-        # extrinsic=None
+        extrinsic=None
     ):
         raster_settings = self.raster_settings
 
@@ -655,5 +655,5 @@ class GaussianRasterizerIndexed(nn.Module):
             rotations,
             cov3D_precomp,
             raster_settings,
-            # extrinsic
+            extrinsic
         )
