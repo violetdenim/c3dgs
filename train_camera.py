@@ -69,7 +69,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
         epoch_stats = {key: 0.0 for key in metric_keys}
         num_pixels = 0
 
-        for i_camera, viewpoint_cam in enumerate(scene.getTrainCameras()[0]):
+        for i_camera, viewpoint_cam in enumerate(scene.getTrainCameras()[0:1]):
             gaussians.update_learning_rate(iteration)
 
             render_pkg = gaussians.render(viewpoint_cam, pipeline_params, bg)
@@ -80,7 +80,6 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
                 render_pkg["visible"])
             if iteration % data_count == 0 and epoch % 10 == 0 and show_img:
                 show_image = np.clip(image.detach().cpu().numpy().transpose(1, 2, 0), 0, 1)
-                # show_image = viewpoint_cam.original_image.detach().cpu().numpy().transpose(1, 2, 0)
                 if image_axis is None:
                     plt.ion()
                     fig = plt.figure()
@@ -91,12 +90,14 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
                     fig.canvas.flush_events()
 
             # Loss
-            loss = torch.abs(original_extrinsics[i_camera] - viewpoint_cam.extrinsic).sum()
+            gt_image = viewpoint_cam.original_image.to(device)
+            l1_diff = l1_loss(image, gt_image)
+            _ssim = ssim(image, gt_image)
+            loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
+            # loss = torch.abs(original_extrinsics[i_camera] - viewpoint_cam.extrinsic).sum()
             loss.backward()
-            print(viewpoint_cam.extrinsic)
-            # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
 
+            # Progress bar
             iteration_stats = {"loss": loss.item()}
 
             for k in epoch_stats.keys():

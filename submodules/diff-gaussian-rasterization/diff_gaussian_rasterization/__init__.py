@@ -48,7 +48,7 @@ def rasterize_gaussians(
     rotations,
     cov3Ds_precomp,
     raster_settings,
-    extrinsic
+    # extrinsic
 ):
     return _RasterizeGaussians.apply(
         means3D,
@@ -60,7 +60,7 @@ def rasterize_gaussians(
         rotations,
         cov3Ds_precomp,
         raster_settings,
-        extrinsic
+        # extrinsic
     )
 
 
