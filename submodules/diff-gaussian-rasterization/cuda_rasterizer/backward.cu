@@ -301,8 +301,8 @@ __device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const gl
 
 	const float* dL_dcov3D = dL_dcov3Ds + 6 * idx;
 
-	glm::vec3 dunc(dL_dcov3D[0], dL_dcov3D[3], dL_dcov3D[5]);
-	glm::vec3 ounc = 0.5f * glm::vec3(dL_dcov3D[1], dL_dcov3D[2], dL_dcov3D[4]);
+	//glm::vec3 dunc(dL_dcov3D[0], dL_dcov3D[3], dL_dcov3D[5]);
+	//glm::vec3 ounc = 0.5f * glm::vec3(dL_dcov3D[1], dL_dcov3D[2], dL_dcov3D[4]);
 
 	// Convert per-element covariance loss gradients to matrix form
 	glm::mat3 dL_dSigma = glm::mat3(

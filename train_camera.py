@@ -18,7 +18,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     device = "cuda" # "cpu"
     prepare_output_and_logger(dataset)
     dataset.data_device = device
-    gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True, device=device, is_splitted=False)
+    gaussians = GaussianModel(dataset.sh_degree, quantization=True, use_factor_scaling=True, device=device, is_splitted=True)
     scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=False, save_memory=False)
     gaussians.training_setup(opt)
     # implementing morton sorting
@@ -52,18 +52,26 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     full_stats = {k: [] for k in metric_keys}
     image_axis = None
 
+    lr_cam = 1e-03#1e-4
     original_extrinsics = []
+    param_groups = []
     for i, viewpoint_cam in enumerate(scene.getTrainCameras()[0:1]):
-        gaussians.optimizer.add_param_group({"params": [viewpoint_cam.extrinsic], "lr": 0.01, "name": f"extr{i}"})
+        param_groups.append({"params": [viewpoint_cam.extrinsic], "lr": lr_cam, "name": f"extr{i}"})
         original_extrinsics.append(viewpoint_cam.extrinsic.clone())
+        # spoil initial solution:
+        viewpoint_cam.extrinsic += 0.1 * (torch.rand((4, 4), device=gaussians.device) - 0.5)
         viewpoint_cam.extrinsic.requires_grad_(True)
+
+    # for group in param_groups:
+    #     gaussians.optimizer.add_param_group(group)
+    gaussians.optimizer = torch.optim.Adam(param_groups)
 
     for epoch in (progress_bar := tqdm(range(epoch_count), desc="Training progress")):
         epoch_stats = {key: 0.0 for key in metric_keys}
         num_pixels = 0
 
         for i_camera, viewpoint_cam in enumerate(scene.getTrainCameras()[0:1]):
-            gaussians.update_learning_rate(iteration)
+            # gaussians.update_learning_rate(iteration)
 
             render_pkg = gaussians.render(viewpoint_cam, pipeline_params, bg)
 
@@ -83,12 +91,18 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
                     fig.canvas.flush_events()
 
             # Loss
-            gt_image = viewpoint_cam.original_image.to(device)
-            l1_diff = l1_loss(image, gt_image)
-            _ssim = ssim(image, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
-            # loss = torch.abs(original_extrinsics[i_camera] - viewpoint_cam.extrinsic).sum()
+            # gt_image = viewpoint_cam.original_image.to(device)
+            # l1_diff = l1_loss(image, gt_image)
+            # _ssim = ssim(image, gt_image)
+            # loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
+            # loss.backward()
+
+            #loss = torch.exp(torch.abs(original_extrinsics[i_camera] - viewpoint_cam.extrinsic)).sum()
+            loss = torch.exp(torch.mul(original_extrinsics[i_camera], viewpoint_cam.extrinsic)).sum()
             loss.backward()
+            print(loss.item(), viewpoint_cam.extrinsic.grad)
+            # print(loss2.item(), viewpoint_cam.extrinsic)
+
 
             # Progress bar
             iteration_stats = {"loss": loss.item()}

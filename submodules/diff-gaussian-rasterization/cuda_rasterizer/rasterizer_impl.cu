@@ -691,5 +691,7 @@ void CudaRasterizer::Rasterizer::backward_indexed(
 		sh_indices,
 		g_indices), debug)
 
+    //TBD: replace this into calculation of gradients direction (+1 or -1)
+    //how ???
 	cudaMemcpy(dL_dViewMatrix, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToDevice);
 }
