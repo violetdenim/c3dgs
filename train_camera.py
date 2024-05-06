@@ -61,6 +61,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
         # spoil initial solution:
         viewpoint_cam.extrinsic += 0.1 * (torch.rand((4, 4), device=gaussians.device) - 0.5)
         viewpoint_cam.extrinsic.requires_grad_(True)
+        viewpoint_cam.extrinsic.retain_grad()
 
     # for group in param_groups:
     #     gaussians.optimizer.add_param_group(group)
@@ -91,15 +92,15 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
                     fig.canvas.flush_events()
 
             # Loss
-            # gt_image = viewpoint_cam.original_image.to(device)
-            # l1_diff = l1_loss(image, gt_image)
-            # _ssim = ssim(image, gt_image)
-            # loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
-            # loss.backward()
+            gt_image = viewpoint_cam.original_image.to(device)
+            l1_diff = l1_loss(image, gt_image)
+            _ssim = ssim(image, gt_image)
+            loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
+            loss.backward()
 
             #loss = torch.exp(torch.abs(original_extrinsics[i_camera] - viewpoint_cam.extrinsic)).sum()
-            loss = torch.exp(torch.mul(original_extrinsics[i_camera], viewpoint_cam.extrinsic)).sum()
-            loss.backward()
+            # loss = torch.exp(torch.mul(original_extrinsics[i_camera], viewpoint_cam.extrinsic)).sum()
+            # loss.backward()
             print(loss.item(), viewpoint_cam.extrinsic.grad)
             # print(loss2.item(), viewpoint_cam.extrinsic)
 

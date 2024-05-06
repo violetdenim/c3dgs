@@ -39,7 +39,12 @@ from compression.vq import CompressionSettings, compress_gaussians
 from simple_knn._C import distCUDA2
 # from utils.splats import to_full_cov, extract_rot_scale
 import math
-from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer, GaussianRasterizerIndexed, getProjectionMatrix
+# from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer, GaussianRasterizerIndexed, getProjectionMatrix
+
+
+# TBD: exclude all parameters except for camera
+# ideally make automatic backward
+from diff_gaussian_rasterization_no_camera import GaussianRasterizationSettings, GaussianRasterizer, GaussianRasterizerIndexed, getProjectionMatrix
 from utils.sh_utils import eval_sh
 
 # from utils.graphics_utils import BasicPointCloud

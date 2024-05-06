@@ -1,0 +1,5 @@
+build/
+diff_gaussian_rasterization.egg-info/
+dist/
+/diff_gaussian_rasterization_camera.egg-info/
+/third_party/
