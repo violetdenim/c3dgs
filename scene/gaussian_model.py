@@ -793,7 +793,7 @@ class GaussianModel:
         # Set up rasterization configuration
         raster_settings = GaussianRasterizationSettings(
             intrinsic=viewpoint_camera.intrinsic.cuda(),
-            # extrinsic=viewpoint_camera.extrinsic.cuda(),
+            extrinsic=viewpoint_camera.extrinsic.cuda(),
             bg=bg_color.cuda(),
             scale_modifier=scaling_modifier,
             sh_degree=self.active_sh_degree,
@@ -808,7 +808,7 @@ class GaussianModel:
         means2D = screenspace_points
         opacity = self.get_opacity
 
-        rasterizer = GaussianRasterizerIndexed(raster_settings=raster_settings) if render_indexed \
+        rasterizer = GaussianRasterizerIndexed(raster_settings=raster_settings, optimize_camera=True) if render_indexed \
             else GaussianRasterizer(raster_settings=raster_settings)
 
         # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
