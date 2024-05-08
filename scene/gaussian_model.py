@@ -39,14 +39,10 @@ from compression.vq import CompressionSettings, compress_gaussians
 from simple_knn._C import distCUDA2
 # from utils.splats import to_full_cov, extract_rot_scale
 import math
-# from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer, GaussianRasterizerIndexed, getProjectionMatrix
 
-
-# TBD: exclude all parameters except for camera
-# ideally make automatic backward
-from diff_gaussian_rasterization_no_camera import GaussianRasterizationSettings, GaussianRasterizer, GaussianRasterizerIndexed, getProjectionMatrix
+from diff_gaussian_rasterization_no_camera import GaussianRasterizationSettings, GaussianRasterizer, \
+    GaussianRasterizerIndexed, getProjectionMatrix, quat_to_mat
 from utils.sh_utils import eval_sh
-
 # from utils.graphics_utils import BasicPointCloud
 
 
@@ -748,7 +744,7 @@ class GaussianModel:
         data = torch.cat([self.get_xyz, torch.ones((n, 1)).to(self.device)], axis=1) # n x 4
         u = data @ P[:, 0]
         v = data @ P[:, 1]
-        z = data @ P[:, 3] + 1e-7
+        z = data @ P[:, 2] + 1e-7 #P[:, 3] ???
         u /= z
         v /= z
         # z = data @ W[:, 2] # n x 4
@@ -793,7 +789,7 @@ class GaussianModel:
         # Set up rasterization configuration
         raster_settings = GaussianRasterizationSettings(
             intrinsic=viewpoint_camera.intrinsic.cuda(),
-            extrinsic=viewpoint_camera.extrinsic.cuda(),
+            extrinsic_vector=viewpoint_camera.extrinsic_vector.cuda(),
             bg=bg_color.cuda(),
             scale_modifier=scaling_modifier,
             sh_degree=self.active_sh_degree,
@@ -841,11 +837,12 @@ class GaussianModel:
 
         # precalculate visible points
         if not self.is_splitted:
-            full = viewpoint_camera.extrinsic @ getProjectionMatrix(viewpoint_camera.intrinsic)
+
+            full = quat_to_mat(viewpoint_camera.extrinsic_vector) @ getProjectionMatrix(viewpoint_camera.intrinsic)
             visible = self.markVisible(full)#viewpoint_camera.full_proj_transform)
         else:
             if self.device == torch.device("cuda"):
-                visible = rasterizer.markVisible(self.get_xyz, extrinsic=viewpoint_camera.extrinsic.cuda())
+                visible = rasterizer.markVisible(self.get_xyz, extrinsic_vector=viewpoint_camera.extrinsic_vector.cuda())
 
         # visible = torch.ones(self.get_xyz.shape[0], dtype=torch.bool, device=self.get_xyz.device)
 
@@ -862,7 +859,7 @@ class GaussianModel:
                 scale_factors=scale_factors[visible, :].cuda(),
                 rotations=rotations.cuda() if rotations is not None else None,
                 cov3D_precomp=cov3D_precomp[visible, :].cuda() if cov3D_precomp is not None else None,
-                extrinsic=viewpoint_camera.extrinsic.cuda(),
+                extrinsic_vector=viewpoint_camera.extrinsic_vector.cuda(),
             )
         else:
             rendered_image, radii  = rasterizer( #extrinsic
@@ -874,7 +871,7 @@ class GaussianModel:
                 scales=scales[visible, :].cuda() if scales is not None else None,
                 rotations=rotations[visible, :].cuda() if rotations is not None else None,
                 cov3D_precomp=cov3D_precomp[visible, :].cuda() if cov3D_precomp is not None else None,
-                extrinsic=viewpoint_camera.extrinsic.cuda(),
+                extrinsic_vector=viewpoint_camera.extrinsic_vector.cuda(),
             )
 
         # Those Gaussians that were frustum culled or had a radius of 0 were not visible.

@@ -13,6 +13,17 @@ import torch
 from torch import nn
 import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
+def mat_to_quat(m, normed=True):
+    w = torch.sqrt(1.0 + m[0, 0] + m[1, 1] + m[2,2]) / 2.0
+    w4 = 4.0 * w
+    x = (m[2, 1] - m[1, 2]) / w4
+    y = (m[0, 2] - m[2, 0]) / w4
+    z = (m[1, 0] - m[0, 1]) / w4
+    if normed:
+        norm2 = (x*x + y*y + z*z + w*w)**0.5
+        x, y, z, w = x/norm2, y/norm2, z/norm2, w/norm2
+
+    return x, y, z, w, m[0, 3], m[1, 3], m[2, 3]
 
 class Camera(nn.Module):
     def __init__(self, colmap_id, extrinsic, intrinsic, h, w, #R, T, FoVx, FoVy
@@ -23,7 +34,8 @@ class Camera(nn.Module):
 
         self.uid = uid
         self.colmap_id = colmap_id
-        self.extrinsic = torch.FloatTensor(extrinsic).transpose(0, 1).cuda()
+        #self.extrinsic = torch.FloatTensor(extrinsic).transpose(0, 1).cuda()
+        self.extrinsic_vector = torch.FloatTensor(mat_to_quat(torch.FloatTensor(extrinsic)))
         self.intrinsic = torch.FloatTensor(intrinsic).cuda()
         self.intrinsic[0, 2] = w
         self.intrinsic[1, 2] = h

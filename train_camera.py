@@ -13,6 +13,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams, Compressi
 from compression.vq import CompressionSettings, compress_gaussians
 from matplotlib import pyplot as plt
 import numpy as np
+from torchviz import make_dot
 
 def training(dataset: ModelParams, opt: OptimizationParams, comp_params: CompressionParams):
     device = "cuda" # "cpu"
@@ -52,19 +53,16 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
     full_stats = {k: [] for k in metric_keys}
     image_axis = None
 
-    lr_cam = 1e-03#1e-4
+    lr_cam = 1e-03 # 1e-04
     original_extrinsics = []
     param_groups = []
     for i, viewpoint_cam in enumerate(scene.getTrainCameras()[0:1]):
-        param_groups.append({"params": [viewpoint_cam.extrinsic], "lr": lr_cam, "name": f"extr{i}"})
-        original_extrinsics.append(viewpoint_cam.extrinsic.clone())
+        param_groups.append({"params": [viewpoint_cam.extrinsic_vector], "lr": lr_cam, "name": f"extr{i}"})
+        original_extrinsics.append(viewpoint_cam.extrinsic_vector.clone())
         # spoil initial solution:
-        viewpoint_cam.extrinsic += 0.1 * (torch.rand((4, 4), device=gaussians.device) - 0.5)
-        viewpoint_cam.extrinsic.requires_grad_(True)
-        viewpoint_cam.extrinsic.retain_grad()
-
-    # for group in param_groups:
-    #     gaussians.optimizer.add_param_group(group)
+        viewpoint_cam.extrinsic_vector += 0.1 * (torch.rand_like(viewpoint_cam.extrinsic_vector) - 0.5)
+        viewpoint_cam.extrinsic_vector.requires_grad_(True)
+        viewpoint_cam.extrinsic_vector.retain_grad()
     gaussians.optimizer = torch.optim.Adam(param_groups)
 
     for epoch in (progress_bar := tqdm(range(epoch_count), desc="Training progress")):
@@ -75,7 +73,6 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
             # gaussians.update_learning_rate(iteration)
 
             render_pkg = gaussians.render(viewpoint_cam, pipeline_params, bg)
-
             image, viewspace_point_tensor, visibility_filter, radii, visible = (
                 render_pkg["render"], render_pkg["viewspace_points"],
                 render_pkg["visibility_filter"], render_pkg["radii"],
@@ -90,6 +87,8 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
                     image_axis.set_data(show_image)
                     plt.draw()
                     fig.canvas.flush_events()
+            # make_dot(image).view()
+            # exit(0)
 
             # Loss
             gt_image = viewpoint_cam.original_image.to(device)
@@ -98,12 +97,7 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
             loss = (1.0 - opt.lambda_dssim) * l1_diff + opt.lambda_dssim * (1.0 - _ssim)
             loss.backward()
 
-            #loss = torch.exp(torch.abs(original_extrinsics[i_camera] - viewpoint_cam.extrinsic)).sum()
-            # loss = torch.exp(torch.mul(original_extrinsics[i_camera], viewpoint_cam.extrinsic)).sum()
-            # loss.backward()
-            print(loss.item(), viewpoint_cam.extrinsic.grad)
-            # print(loss2.item(), viewpoint_cam.extrinsic)
-
+            print(loss.item(), viewpoint_cam.extrinsic_vector.grad)
 
             # Progress bar
             iteration_stats = {"loss": loss.item()}
@@ -114,12 +108,9 @@ def training(dataset: ModelParams, opt: OptimizationParams, comp_params: Compres
             progress_bar.set_postfix(iteration_stats)
             gaussians.optimizer.step()
             gaussians.optimizer.zero_grad(set_to_none=True)
-            # if viewpoint_cam.extrinsic.grad is not None:
-            #     viewpoint_cam.extrinsic.grad.zero_()
 
             iteration += 1
             num_pixels += image.shape[1] * image.shape[2]
-
 
         if epoch in testing_epochs:
             print(f"\n[EPOCH {epoch}] " + ",".join([f"{k}: {v/(data_count/data_step):.4f}" for k, v in epoch_stats.items()]))

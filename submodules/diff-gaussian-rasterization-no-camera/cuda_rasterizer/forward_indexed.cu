@@ -126,6 +126,9 @@ __device__ void computeCov3D_indexed(const glm::vec3 scale, float mod, const glm
 {
 	// Create scaling matrix
 	glm::mat3 S = glm::mat3(1.0f);
+// 	S[0][0] = mod * scale.x;
+// 	S[1][1] = mod * scale.y;
+// 	S[2][2] = mod * scale.z;
 	S[0][0] = mod * scale.x;
 	S[1][1] = mod * scale.y;
 	S[2][2] = mod * scale.z;
